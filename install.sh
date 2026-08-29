@@ -128,11 +128,28 @@ EOF
   systemctl enable ${SERVICE_NAME}
   systemctl restart ${SERVICE_NAME}
 
+  # Automatically configure UFW firewall rules for panel and VPN ports
+  echo -e "${BLUE}Configuring UFW Firewall for Panel port and VPN services...${NC}"
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow ${CUSTOM_PORT}/tcp 2>/dev/null
+    ufw allow 51820:51835/udp 2>/dev/null
+    ufw allow 500,4500,1701/udp 2>/dev/null
+    ufw allow 1194:1200/udp 2>/dev/null
+    ufw allow 1194/tcp 2>/dev/null
+    echo -e "${GREEN}✓ Firewall rules added (Web: ${CUSTOM_PORT}/tcp, WG: 51820-51835/udp, L2TP: 500/4500/1701/udp, OVPN: 1194/udp).${NC}"
+  fi
+
   echo -e "${GREEN}==========================================================${NC}"
   echo -e "${GREEN}  Installation completed successfully!${NC}"
   echo -e "${GREEN}  Service is running on port ${CUSTOM_PORT} (${NODE_ENV_VAL} mode).${NC}"
   echo -e "${GREEN}  You can access it at: http://\$(curl -s ipv4.icanhazip.com):${CUSTOM_PORT}${NC}"
   echo -e "${GREEN}==========================================================${NC}"
+  echo ""
+  
+  read -p "Do you want to install and activate the Linux Core VPN daemons (WireGuard + L2TP/IPSec + OpenVPN) now? (Y/n): " AUTO_VPN
+  if [[ ! "$AUTO_VPN" =~ ^[Nn]$ ]]; then
+    setup_system_vpn_services
+  fi
 }
 
 update_service() {

@@ -459,7 +459,7 @@ function syncLocalVpnServices() {
       console.log(`[VPN Sync] /etc/wireguard/wg0.conf successfully synchronized with ${dbData.subscriptions.length} peers.`);
 
       // Apply the WireGuard configurations dynamically using hot-reload syncconf
-      exec("wg syncconf wg0 <(wg-quick strip wg0)", (err, stdout, stderr) => {
+      exec("wg syncconf wg0 <(wg-quick strip wg0)", { shell: "/bin/bash" }, (err, stdout, stderr) => {
         if (err) {
           console.warn("[VPN Sync] wg syncconf hot-reload failed, attempting full systemctl restart of wg-quick@wg0:", stderr || err.message);
           exec("systemctl restart wg-quick@wg0", (restartErr, restartStdout, restartStderr) => {
@@ -1884,6 +1884,65 @@ app.post("/api/settings", (req, res) => {
   res.json({ success: true, settings: dbData.settings });
 });
 
+// System Doctor & Live Diagnostics Endpoint
+app.get("/api/system/doctor", async (req, res) => {
+  const host = req.headers.host || "127.0.0.1";
+  const webPort = host.includes(":") ? parseInt(host.split(":")[1]) : (process.env.PORT ? parseInt(process.env.PORT) : 3000);
+  const detectedIp = await detectServerPublicIp();
+  const configuredIp = dbData.settings?.l2tpServerIp || detectedIp || host.split(":")[0];
+  const isLinux = process.platform === "linux";
+
+  const wgPort = dbData.settings?.wgServerPort || 51820;
+  const l2tpPorts = [500, 4500, 1701];
+  const openvpnPort = 1194;
+
+  const hasWgConf = isLinux ? fs.existsSync("/etc/wireguard/wg0.conf") : false;
+  const hasChapSecrets = isLinux ? fs.existsSync("/etc/ppp/chap-secrets") : false;
+  const hasIpsecSecrets = isLinux ? (fs.existsSync("/etc/ipsec.secrets") || fs.existsSync("/etc/strongswan/ipsec.secrets")) : false;
+  const hasTun2socks = isLinux ? fs.existsSync("/usr/local/bin/tun2socks") : false;
+  const hasXray = isLinux ? fs.existsSync("/usr/local/bin/xray") : false;
+
+  const diagnostics = {
+    platform: process.platform,
+    isLinux,
+    webPort,
+    detectedIp,
+    configuredIp,
+    wireguard: {
+      port: wgPort,
+      protocol: "UDP",
+      hasConfigFile: hasWgConf,
+      status: hasWgConf ? "configured" : "needs_installation",
+      publicKey: dbData.settings?.wgServerPublicKey || "",
+      peersCount: dbData.subscriptions.length,
+    },
+    l2tp: {
+      ports: l2tpPorts,
+      protocol: "UDP",
+      hasChapSecrets,
+      hasIpsecSecrets,
+      status: hasChapSecrets ? "configured" : "needs_installation",
+      psk: dbData.settings?.l2tpPsk || "SanaeiL2TPSecureKey",
+      usersCount: dbData.subscriptions.filter(s => s.l2tpUser).length,
+    },
+    openvpn: {
+      port: openvpnPort,
+      protocol: "UDP/TCP",
+      status: isLinux ? "available" : "ready",
+    },
+    bridge: {
+      enabled: dbData.settings?.bridgeRoutingEnabled ?? true,
+      hasTun2socks,
+      hasXray,
+      inboundsCount: dbData.inbounds.length,
+    },
+    firewallFixCommand: `ufw allow ${webPort}/tcp && ufw allow ${wgPort}/udp && ufw allow 500,4500,1701/udp && ufw allow ${openvpnPort}/udp`,
+    oneLineInstaller: `curl -sSL http://${configuredIp}:${webPort}/install.sh | bash`
+  };
+
+  res.json(diagnostics);
+});
+
 // 2.6. Inbounds Management API (Multi-Inbound support for all users)
 app.post("/api/inbounds/sync-from-panels", async (req, res) => {
   let totalInboundsSynced = 0;
@@ -2731,7 +2790,12 @@ function resolveConnectionHost(req: any, directNodeIp: string, customBridgeIp?: 
     const bridgeHost = customBridgeIp || dbData.settings?.bridgeServerIp || req.headers.host?.split(":")[0] || "127.0.0.1";
     return { host: bridgeHost, isBridge: true };
   }
-  return { host: directNodeIp, isBridge: false };
+  
+  let host = directNodeIp;
+  if (!host || host === "127.0.0.1" || host === "localhost" || host === "142.250.74.46") {
+    host = req.headers.host?.split(":")[0] || "127.0.0.1";
+  }
+  return { host, isBridge: false };
 }
 
 // 5. Windows PBK L2TP configuration profile download

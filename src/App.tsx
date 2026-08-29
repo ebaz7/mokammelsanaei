@@ -41,11 +41,18 @@ export default function App() {
   // Localization state (fa = Persian, en = English)
   const [lang, setLang] = useState<"fa" | "en">("fa");
 
-  // App major views: 'dashboard', 'inbounds', 'bridge', 'panels', 'converter', 'settings', 'manuals'
-  const [currentTab, setCurrentTab] = useState<"dashboard" | "inbounds" | "bridge" | "panels" | "converter" | "settings" | "manuals">("dashboard");
+  // App major views: 'dashboard', 'inbounds', 'bridge', 'doctor', 'panels', 'converter', 'settings', 'manuals'
+  const [currentTab, setCurrentTab] = useState<"dashboard" | "inbounds" | "bridge" | "doctor" | "panels" | "converter" | "settings" | "manuals">("dashboard");
 
   // Feasibility Guide modal state
   const [showFeasibilityModal, setShowFeasibilityModal] = useState(false);
+
+  // System Doctor & Diagnostics State
+  const [doctorData, setDoctorData] = useState<any>(null);
+  const [loadingDoctor, setLoadingDoctor] = useState(false);
+  const [quickFixCopied, setQuickFixCopied] = useState(false);
+  const [testWgPortInput, setTestWgPortInput] = useState(51820);
+  const [isUpdatingWgPort, setIsUpdatingWgPort] = useState(false);
 
   // Bridge Tab States (V2Ray / Xray Middle Bridge Gateway)
   const [bridgeSelectedInboundId, setBridgeSelectedInboundId] = useState<string>("");
@@ -517,6 +524,52 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
     }
   };
 
+  const fetchDoctorData = async () => {
+    setLoadingDoctor(true);
+    try {
+      const res = await fetch("/api/system/doctor");
+      if (res.ok) {
+        const data = await res.json();
+        setDoctorData(data);
+        if (data.wireguard?.port) {
+          setTestWgPortInput(data.wireguard.port);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load doctor data", e);
+    } finally {
+      setLoadingDoctor(false);
+    }
+  };
+
+  const handleQuickUpdateWgPort = async (newPort: number) => {
+    setIsUpdatingWgPort(true);
+    try {
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wgServerPort: newPort,
+        }),
+      });
+      if (res.ok) {
+        setWgServerPortState(newPort);
+        await fetchDoctorData();
+        await fetchSettings();
+        await fetchSubscriptions();
+        alert(
+          lang === "fa"
+            ? `✅ پورت سرور وایرگارد به ${newPort} (UDP) تغییر یافت و در تمام کانفیگ‌های کاربران بازنویسی شد.`
+            : `✅ WireGuard server port changed to ${newPort} (UDP) and updated across all client configs.`
+        );
+      }
+    } catch (e: any) {
+      alert(`Error updating port: ${e.message}`);
+    } finally {
+      setIsUpdatingWgPort(false);
+    }
+  };
+
   // Fetch initial data
   useEffect(() => {
     fetchPanels();
@@ -524,6 +577,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
     fetchInbounds();
     fetchSettings();
     fetchPublicIp();
+    fetchDoctorData();
   }, []);
 
   const fetchInbounds = async () => {
@@ -792,10 +846,6 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
   // Delete Panel
   const handleDeletePanel = async (id: string) => {
-    if (id === "mock-panel") {
-      alert(lang === "fa" ? "امکان حذف پنل دمو وجود ندارد." : "Demo panel cannot be deleted.");
-      return;
-    }
     if (!confirm(lang === "fa" ? "آیا از حذف این پنل اطمینان دارید؟" : "Are you sure you want to delete this panel?")) return;
     try {
       const res = await fetch(`/api/panels/${id}`, { method: "DELETE" });
@@ -1092,7 +1142,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8">
         
         {/* Navigation Tabs */}
-        <div className="flex flex-wrap items-center gap-1 p-1 bg-gray-100 rounded-2xl max-w-3xl mb-8" id="main-tabs">
+        <div className="flex flex-wrap items-center gap-1 p-1 bg-gray-100 rounded-2xl max-w-4xl mb-8" id="main-tabs">
           <button
             onClick={() => setCurrentTab("dashboard")}
             className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
@@ -1133,6 +1183,24 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
             </span>
           </button>
           
+          <button
+            onClick={() => {
+              setCurrentTab("doctor");
+              fetchDoctorData();
+            }}
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+              currentTab === "doctor"
+                ? "bg-white text-emerald-900 shadow-sm border border-emerald-200"
+                : "text-gray-500 hover:text-emerald-700 hover:bg-white/50"
+            }`}
+          >
+            <Activity className="h-4 w-4 text-emerald-500" />
+            {lang === "fa" ? "پزشک و پورت‌ها" : "Port Doctor"}
+            <span className="text-[9px] bg-emerald-100 text-emerald-800 font-bold px-1.5 py-0.2 rounded-full">
+              {lang === "fa" ? "عیب‌یابی" : "Health"}
+            </span>
+          </button>
+
           <button
             onClick={() => setCurrentTab("panels")}
             className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
@@ -3215,6 +3283,301 @@ PersistentKeepalive = 25`}
 
               </div>
 
+            </div>
+
+          </div>
+        )}
+
+        {/* ==================== TAB: DOCTOR (VPN PORT & CONNECTIVITY DIAGNOSTICS) ==================== */}
+        {currentTab === "doctor" && (
+          <div className="max-w-5xl mx-auto space-y-8 animate-fade-in">
+            
+            {/* Header Diagnostic Banner */}
+            <div className="bg-linear-to-r from-emerald-600 via-teal-600 to-indigo-700 rounded-3xl p-6 sm:p-8 text-white shadow-lg space-y-4">
+              <div className="flex items-center justify-between flex-wrap gap-4">
+                <div className="flex items-center gap-3.5">
+                  <div className="p-3 bg-white/15 backdrop-blur-md rounded-2xl border border-white/20">
+                    <Activity className="h-6 w-6 text-emerald-300" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-base sm:text-lg font-black tracking-tight">
+                        {lang === "fa" ? "پزشک اتصال و عیب‌یابی پورت‌های VPN" : "VPN Port & Connection Doctor"}
+                      </h2>
+                      <span className="text-[10px] bg-emerald-400 text-emerald-950 font-black px-2 py-0.5 rounded-full uppercase">
+                        {lang === "fa" ? "تحلیل جامع" : "Full Diagnosis"}
+                      </span>
+                    </div>
+                    <p className="text-xs text-emerald-100/90 mt-1">
+                      {lang === "fa"
+                        ? "بررسی دقیق دلایل عدم اتصال WireGuard و L2TP هنگام تغییر پورت پنل، وضعیت فایروال و دیمون‌ها"
+                        : "Detailed root-cause analysis for WireGuard/L2TP connection failures with custom panel ports"}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  onClick={fetchDoctorData}
+                  disabled={loadingDoctor}
+                  className="flex items-center gap-2 px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-xl text-xs font-bold transition-all backdrop-blur-md border border-white/20 cursor-pointer"
+                >
+                  <RefreshCw className={`h-4 w-4 ${loadingDoctor ? "animate-spin" : ""}`} />
+                  <span>{lang === "fa" ? "بررسی مجدد وضعیت" : "Refresh Status"}</span>
+                </button>
+              </div>
+
+              {/* Quick Info Grid */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+                <div className="bg-white/10 backdrop-blur-md rounded-2xl p-3.5 border border-white/10">
+                  <span className="block text-[10px] text-emerald-200 font-semibold">{lang === "fa" ? "پورت پنل وب" : "Web Panel Port"}</span>
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <span className="text-sm sm:text-base font-mono font-black">{doctorData?.webPort || 3000}</span>
+                    <span className="text-[9px] bg-white/20 px-1.5 py-0.2 rounded font-mono">TCP</span>
+                  </div>
+                </div>
+
+                <div className="bg-white/10 backdrop-blur-md rounded-2xl p-3.5 border border-white/10">
+                  <span className="block text-[10px] text-emerald-200 font-semibold">{lang === "fa" ? "پورت وایرگارد" : "WireGuard Port"}</span>
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <span className="text-sm sm:text-base font-mono font-black">{doctorData?.wireguard?.port || wgServerPortState || 51820}</span>
+                    <span className="text-[9px] bg-emerald-400 text-emerald-950 font-bold px-1.5 py-0.2 rounded font-mono">UDP</span>
+                  </div>
+                </div>
+
+                <div className="bg-white/10 backdrop-blur-md rounded-2xl p-3.5 border border-white/10">
+                  <span className="block text-[10px] text-emerald-200 font-semibold">{lang === "fa" ? "پورت‌های L2TP" : "L2TP/IPSec Ports"}</span>
+                  <div className="flex items-center gap-1 mt-1 font-mono text-xs sm:text-sm font-bold">
+                    <span>500, 4500, 1701</span>
+                    <span className="text-[9px] bg-white/20 px-1 py-0.2 rounded">UDP</span>
+                  </div>
+                </div>
+
+                <div className="bg-white/10 backdrop-blur-md rounded-2xl p-3.5 border border-white/10">
+                  <span className="block text-[10px] text-emerald-200 font-semibold">{lang === "fa" ? "آی‌پی سرور" : "Server IP"}</span>
+                  <span className="text-xs sm:text-sm font-mono font-bold block mt-1 truncate" title={doctorData?.configuredIp}>
+                    {doctorData?.configuredIp || detectedPublicIp || "127.0.0.1"}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Core Explanations: 4 Real Causes Why It Doesn't Connect */}
+            <div className="bg-white rounded-3xl border border-gray-100 shadow-sm p-6 sm:p-8 space-y-6">
+              <div className="flex items-center gap-2.5 border-b border-gray-100 pb-4">
+                <AlertTriangle className="h-5 w-5 text-amber-500" />
+                <div>
+                  <h3 className="text-sm sm:text-base font-black text-gray-900">
+                    {lang === "fa" ? "چرا با وایرگارد یا L2TP به این سرور وصل نمی‌شوید؟ (۴ دلیل اصلی)" : "Why WireGuard / L2TP Won't Connect? (4 Root Causes)"}
+                  </h3>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {lang === "fa"
+                      ? "بررسی تفاوت پورت وب با پورت‌های UDP سرویس‌های VPN و راه‌حل قطعی هر کدام"
+                      : "Clear breakdown of why custom web port affects connections and how to resolve it"}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                
+                {/* Reason 1: Web Port vs UDP Port */}
+                <div className="bg-amber-50/50 border border-amber-200/70 rounded-2xl p-5 space-y-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-amber-500 text-white font-bold text-xs flex items-center justify-center">۱</span>
+                    <h4 className="text-xs font-bold text-amber-950">
+                      {lang === "fa" ? "تفاوت حیاتی پورت وب با پورت پروتکل‌های VPN" : "Web Port vs VPN UDP Ports"}
+                    </h4>
+                  </div>
+                  <p className="text-xs text-amber-900/80 leading-relaxed">
+                    {lang === "fa"
+                      ? "پورت انتخابی شما در هنگام نصب (مثلاً 3000 یا 8080) فقط برای باز کردن پنل تحت وب در مرورگر است (TCP). کلاینت وایرگارد یا L2TP به پورت وب وصل نمی‌شوند؛ بلکه به پورت اختصاصی UDP (مثل 51820 و 500/4500) وصل می‌شوند."
+                      : "The custom port chosen during install is purely for HTTP/web access. WireGuard and L2TP connect over their own dedicated UDP ports (51820, 500, 4500)."}
+                  </p>
+                  <div className="bg-white/80 rounded-xl p-2.5 text-[11px] font-mono text-amber-900 border border-amber-200/50">
+                    <strong>Endpoint:</strong> {doctorData?.configuredIp || "YOUR_IP"}:{doctorData?.wireguard?.port || wgServerPortState || 51820} (UDP)
+                  </div>
+                </div>
+
+                {/* Reason 2: Linux Core VPN Daemons Not Running */}
+                <div className="bg-indigo-50/50 border border-indigo-200/70 rounded-2xl p-5 space-y-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-indigo-600 text-white font-bold text-xs flex items-center justify-center">۲</span>
+                    <h4 className="text-xs font-bold text-indigo-950">
+                      {lang === "fa" ? "عدم اجرای دیمون هسته لینوکس (WireGuard/xl2tpd)" : "Core Linux VPN Daemons Status"}
+                    </h4>
+                  </div>
+                  <p className="text-xs text-indigo-900/80 leading-relaxed">
+                    {lang === "fa"
+                      ? "پنل وب فقط تنظیمات و کلیدها را در دیتابیس می‌نویسد. برای اینکه ترافیک VPN پاسخ داده شود، سرویس‌های سیستمی لینوکس (wg-quick و strongswan) باید روی سرور نصب و استارت شده باشند."
+                      : "The web panel generates and syncs credentials. The actual system daemons (wg-quick, xl2tpd, strongswan) must be running on the host VPS."}
+                  </p>
+                  <div className="bg-white/80 rounded-xl p-2.5 text-[11px] font-sans text-indigo-900 border border-indigo-200/50 flex items-center justify-between">
+                    <span>{lang === "fa" ? "وضعیت فایل wg0.conf:" : "wg0.conf Status:"}</span>
+                    <span className={`font-bold ${doctorData?.wireguard?.hasConfigFile ? "text-green-600" : "text-amber-600"}`}>
+                      {doctorData?.wireguard?.hasConfigFile ? (lang === "fa" ? "موجود است ✓" : "Exists ✓") : (lang === "fa" ? "نیاز به اجرای اسکریپت" : "Run installer")}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Reason 3: Server Firewall (UFW) or Cloud Security Group */}
+                <div className="bg-rose-50/50 border border-rose-200/70 rounded-2xl p-5 space-y-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-rose-500 text-white font-bold text-xs flex items-center justify-center">۳</span>
+                    <h4 className="text-xs font-bold text-rose-950">
+                      {lang === "fa" ? "بسته بودن پورت‌های UDP در فایروال لینوکس یا کلود" : "Firewall (UFW / Cloud Security Groups)"}
+                    </h4>
+                  </div>
+                  <p className="text-xs text-rose-900/80 leading-relaxed">
+                    {lang === "fa"
+                      ? "در اکثر سرورها (هتزنر، اوراکل، دیجیتال‌اوشن، آروان) فایروال UFW یا پنل کلود به طور پیش‌فرض پورت‌های UDP را مسدود می‌کنند. باید رول اجازه عبور پورت‌های UDP و پورت پنل باز شود."
+                      : "Default firewalls or cloud security groups block incoming UDP traffic. All UDP ports must be explicitly allowed."}
+                  </p>
+                  <div className="bg-white/80 rounded-xl p-2.5 text-[11px] font-mono text-rose-900 border border-rose-200/50">
+                    ufw allow {doctorData?.wireguard?.port || 51820}/udp && ufw allow 500,4500,1701/udp
+                  </div>
+                </div>
+
+                {/* Reason 4: ISP Filtering in Iran */}
+                <div className="bg-emerald-50/50 border border-emerald-200/70 rounded-2xl p-5 space-y-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="w-6 h-6 rounded-full bg-emerald-600 text-white font-bold text-xs flex items-center justify-center">۴</span>
+                    <h4 className="text-xs font-bold text-emerald-950">
+                      {lang === "fa" ? "فیلترینگ UDP روی پورت پیش‌فرض ۵۱۸۲۰ و راهکار" : "ISP Port Filtering & Bridge Solution"}
+                    </h4>
+                  </div>
+                  <p className="text-xs text-emerald-900/80 leading-relaxed">
+                    {lang === "fa"
+                      ? "اپراتورهای ایران پورت معروف 51820 وایرگارد را فیلتر می‌کنند. راهکار: ۱. تغییر پورت وایرگارد به 443 یا 8443 از کادر زیر، ۲. یا فعال‌سازی «پل ارتباطی وی‌توری» تا ترافیک از کانال ضد فیلتر عبور کند."
+                      : "ISPs often throttle or block default port 51820. Fix: Change port to 443/udp below, or enable the V2Ray Relay Bridge."}
+                  </p>
+                  <div className="bg-white/80 rounded-xl p-2.5 text-[11px] font-sans text-emerald-900 border border-emerald-200/50 flex items-center justify-between">
+                    <span>{lang === "fa" ? "پل ارتباطی وی‌توری:" : "V2Ray Bridge:"}</span>
+                    <span className="font-bold text-emerald-700">
+                      {bridgeRoutingEnabled ? (lang === "fa" ? "فعال و آماده اتصال" : "Active & Ready") : (lang === "fa" ? "غیرفعال" : "Disabled")}
+                    </span>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+            {/* Quick Interactive WireGuard Port Switcher */}
+            <div className="bg-white rounded-3xl border border-gray-100 shadow-sm p-6 sm:p-8 space-y-4">
+              <div className="flex items-center gap-2">
+                <Sliders className="h-5 w-5 text-indigo-600" />
+                <h3 className="text-sm sm:text-base font-bold text-gray-900">
+                  {lang === "fa" ? "تغییر سریع پورت سرور وایرگارد (رفع فیلترینگ UDP)" : "Quick WireGuard Port Switcher"}
+                </h3>
+              </div>
+
+              <p className="text-xs text-gray-500 leading-relaxed">
+                {lang === "fa"
+                  ? "اگر کلاینت وایرگارد با پورت فعلی متصل نمی‌شود، پورت را به یکی از پورت‌های بدون فیلتر زیر تغییر دهید. بلافاصله تمام فایل‌های کانفیگ کاربران با پورت جدید بازتولید می‌شوند:"
+                  : "If default port fails due to ISP blocking, choose a non-filtered port below. All downloaded client configs will update immediately:"}
+              </p>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {[51820, 51821, 443, 8443, 2053, 53].map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    onClick={() => handleQuickUpdateWgPort(p)}
+                    disabled={isUpdatingWgPort}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-mono font-bold transition-all cursor-pointer ${
+                      (doctorData?.wireguard?.port || wgServerPortState) === p
+                        ? "bg-indigo-600 text-white shadow-md shadow-indigo-600/20 ring-2 ring-indigo-600/30"
+                        : "bg-gray-100 hover:bg-gray-200 text-gray-700"
+                    }`}
+                  >
+                    Port {p} {p === 443 ? "★ (HTTPS/UDP)" : p === 51820 ? "(Default)" : ""}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2 max-w-sm pt-2">
+                <input
+                  type="number"
+                  value={testWgPortInput}
+                  onChange={(e) => setTestWgPortInput(Number(e.target.value))}
+                  placeholder="Custom UDP Port e.g. 5555"
+                  className="flex-1 text-xs font-mono border border-gray-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleQuickUpdateWgPort(testWgPortInput)}
+                  disabled={isUpdatingWgPort}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
+                >
+                  {isUpdatingWgPort ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                  <span>{lang === "fa" ? "اعمال پورت" : "Apply Port"}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* 1-Line Terminal Fix & Complete Health Command */}
+            <div className="bg-slate-900 text-slate-100 rounded-3xl p-6 sm:p-8 space-y-5 border border-slate-800 shadow-lg">
+              <div className="flex items-center justify-between flex-wrap gap-4 border-b border-slate-800 pb-4">
+                <div className="flex items-center gap-2.5">
+                  <Terminal className="h-5 w-5 text-green-400" />
+                  <div>
+                    <h3 className="text-sm sm:text-base font-bold text-white">
+                      {lang === "fa" ? "دستور تک‌خطی رفع ۱۰۰٪ خطای اتصال در سرور (SSH Terminal)" : "1-Line Instant Terminal Fix Command"}
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      {lang === "fa"
+                        ? "این دستور فایروال UFW را برای پورت وب و تمام پورت‌های VPN باز می‌کند و سرویس‌های وایرگارد و L2TP را استارت می‌زند"
+                        : "Opens UFW firewall rules for web port & VPN UDP ports, and starts all background daemons"}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => {
+                    const cmd = `ufw allow ${doctorData?.webPort || 3000}/tcp ; ufw allow ${doctorData?.wireguard?.port || wgServerPortState || 51820}/udp ; ufw allow 500,4500,1701/udp ; ufw allow 1194/udp ; curl -sSL http://${doctorData?.configuredIp || "127.0.0.1"}:${doctorData?.webPort || 3000}/install.sh | bash`;
+                    triggerCopy(cmd, "quick_doctor_cmd");
+                    setQuickFixCopied(true);
+                    setTimeout(() => setQuickFixCopied(false), 3000);
+                  }}
+                  className="flex items-center gap-2 px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer"
+                >
+                  {copiedId === "quick_doctor_cmd" ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+                  <span>{copiedId === "quick_doctor_cmd" ? (lang === "fa" ? "دستور کپی شد!" : "Copied!") : (lang === "fa" ? "کپی دستور رفع خودکار" : "Copy Fix Command")}</span>
+                </button>
+              </div>
+
+              <div className="bg-slate-950 p-4 rounded-2xl border border-slate-800 font-mono text-xs text-emerald-400 overflow-x-auto leading-relaxed select-all">
+                <code>
+                  {`# ۱. باز کردن تمام پورت‌ها در فایروال سرور:`}<br />
+                  {`sudo ufw allow ${doctorData?.webPort || 3000}/tcp && sudo ufw allow ${doctorData?.wireguard?.port || wgServerPortState || 51820}/udp && sudo ufw allow 500,4500,1701/udp && sudo ufw allow 1194/udp`}<br /><br />
+                  {`# ۲. راه‌اندازی و اجرای خودکار هسته‌های WireGuard و L2TP:`}<br />
+                  {`curl -sSL http://${doctorData?.configuredIp || "YOUR_SERVER_IP"}:${doctorData?.webPort || 3000}/install.sh | sudo bash`}
+                </code>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs text-slate-300">
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 flex items-start gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="block text-white text-[11px]">{lang === "fa" ? "گام ۱: فایروال لینوکس" : "Step 1: Firewall"}</strong>
+                    <span className="text-[10px] text-slate-400">{lang === "fa" ? "پورت‌های UDP و TCP آزاد می‌شوند." : "All required ports unblocked in UFW."}</span>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 flex items-start gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="block text-white text-[11px]">{lang === "fa" ? "گام ۲: هسته لینوکس" : "Step 2: Kernel Daemons"}</strong>
+                    <span className="text-[10px] text-slate-400">{lang === "fa" ? "دیمون‌های wg0 و xl2tpd فعال می‌شوند." : "wg0 & xl2tpd systemd services running."}</span>
+                  </div>
+                </div>
+
+                <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 flex items-start gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="block text-white text-[11px]">{lang === "fa" ? "گام ۳: اتصال کلاینت" : "Step 3: Client Connect"}</strong>
+                    <span className="text-[10px] text-slate-400">{lang === "fa" ? "فایل کانفیگ دانلود شده فوراً وصل می‌شود." : "Downloaded client config connects instantly."}</span>
+                  </div>
+                </div>
+              </div>
             </div>
 
           </div>
