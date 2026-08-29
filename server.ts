@@ -98,6 +98,9 @@ interface DB {
     wgServerPublicKey: string;
     wgServerPort: number;
     wgServerDns: string;
+    bridgeRoutingEnabled?: boolean;
+    bridgeServerIp?: string;
+    bridgeUpstreamInboundId?: string;
   };
 }
 
@@ -1841,17 +1844,21 @@ app.post("/api/settings/apply-server-ip", (req, res) => {
 });
 
 app.post("/api/settings", (req, res) => {
-  const { l2tpServerIp, l2tpPsk, wgServerPrivateKey, wgServerPublicKey, wgServerPort, wgServerDns, updateAllInbounds } = req.body;
+  const { l2tpServerIp, l2tpPsk, wgServerPrivateKey, wgServerPublicKey, wgServerPort, wgServerDns, bridgeRoutingEnabled, bridgeServerIp, bridgeUpstreamInboundId, updateAllInbounds } = req.body;
   
   const cleanIp = l2tpServerIp ? l2tpServerIp.trim().replace(/^https?:\/\//i, "").split("/")[0].split(":")[0] : "";
+  const cleanBridgeIp = bridgeServerIp !== undefined ? bridgeServerIp.trim().replace(/^https?:\/\//i, "").split("/")[0].split(":")[0] : (dbData.settings?.bridgeServerIp || "");
 
   dbData.settings = {
     l2tpServerIp: cleanIp || dbData.settings?.l2tpServerIp || "",
-    l2tpPsk: l2tpPsk || "SanaeiL2TPSecureKey",
-    wgServerPrivateKey: wgServerPrivateKey || "",
-    wgServerPublicKey: wgServerPublicKey || "",
-    wgServerPort: Number(wgServerPort) || 51820,
-    wgServerDns: wgServerDns || "1.1.1.1, 8.8.8.8",
+    l2tpPsk: l2tpPsk || dbData.settings?.l2tpPsk || "SanaeiL2TPSecureKey",
+    wgServerPrivateKey: wgServerPrivateKey !== undefined ? wgServerPrivateKey : (dbData.settings?.wgServerPrivateKey || ""),
+    wgServerPublicKey: wgServerPublicKey !== undefined ? wgServerPublicKey : (dbData.settings?.wgServerPublicKey || ""),
+    wgServerPort: Number(wgServerPort) || dbData.settings?.wgServerPort || 51820,
+    wgServerDns: wgServerDns || dbData.settings?.wgServerDns || "1.1.1.1, 8.8.8.8",
+    bridgeRoutingEnabled: bridgeRoutingEnabled !== undefined ? Boolean(bridgeRoutingEnabled) : (dbData.settings?.bridgeRoutingEnabled ?? true),
+    bridgeServerIp: cleanBridgeIp,
+    bridgeUpstreamInboundId: bridgeUpstreamInboundId !== undefined ? bridgeUpstreamInboundId : dbData.settings?.bridgeUpstreamInboundId,
   };
   
   // Update all existing subscriptions to use the new global server parameters
@@ -2628,6 +2635,18 @@ app.get("/api/sub/:token", async (req, res) => {
   }
 });
 
+// Helper to determine the client endpoint host (Bridge Panel vs Direct Node)
+function resolveConnectionHost(req: any, directNodeIp: string, customBridgeIp?: string): { host: string; isBridge: boolean; upstreamTag?: string } {
+  const reqMode = (req.query.mode as string) || "";
+  const isBridge = reqMode === "bridge" || (reqMode !== "direct" && dbData.settings?.bridgeRoutingEnabled !== false);
+  
+  if (isBridge) {
+    const bridgeHost = customBridgeIp || dbData.settings?.bridgeServerIp || req.headers.host?.split(":")[0] || "127.0.0.1";
+    return { host: bridgeHost, isBridge: true };
+  }
+  return { host: directNodeIp, isBridge: false };
+}
+
 // 5. Windows PBK L2TP configuration profile download
 app.get("/api/sub/:token/l2tp-pbk", (req, res) => {
   const sub = dbData.subscriptions.find((s) => s.id === req.params.token || s.username === req.params.token);
@@ -2638,11 +2657,13 @@ app.get("/api/sub/:token/l2tp-pbk", (req, res) => {
 
   const inboundId = req.query.inboundId as string;
   const inbound = inboundId ? dbData.inbounds.find((i) => i.id === inboundId) : dbData.inbounds[0];
-  const serverIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const directServerIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const { host: serverIp, isBridge } = resolveConnectionHost(req, directServerIp);
   const psk = inbound?.l2tpPsk || sub.l2tpPsk || "SanaeiL2TPSecureKey";
 
   // Windows Phone Book (.pbk) contents
-  const pbkString = `[L2TP_Smart_VPN_${sub.username}]
+  const pbkString = `# Sanaei Smart Sub - ${isBridge ? `[Bridge Mode -> ${inbound?.tag || '3x-ui'}]` : 'Direct Node'}
+[L2TP_Smart_VPN_${sub.username}]
 MEDIA=rastapi
 Port=VPN2-0
 Device=WAN Miniport (L2TP)
@@ -2671,7 +2692,8 @@ app.get("/api/sub/:token/l2tp-mobileconfig", (req, res) => {
 
   const inboundId = req.query.inboundId as string;
   const inbound = inboundId ? dbData.inbounds.find((i) => i.id === inboundId) : dbData.inbounds[0];
-  const serverIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const directServerIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const { host: serverIp, isBridge } = resolveConnectionHost(req, directServerIp);
   const psk = inbound?.l2tpPsk || sub.l2tpPsk || "SanaeiL2TPSecureKey";
   const pskBase64 = Buffer.from(psk).toString("base64");
 
@@ -2706,7 +2728,7 @@ app.get("/api/sub/:token/l2tp-mobileconfig", (req, res) => {
 			<key>PayloadDescription</key>
 			<string>Configures legacy and secure L2TP/IPSec VPN</string>
 			<key>PayloadDisplayName</key>
-			<string>L2TP VPN (${inbound?.tag || "Sanaei Smart Sub"})</string>
+			<string>L2TP VPN (${isBridge ? '🌉 Bridge: ' : ''}${inbound?.tag || "Sanaei Smart Sub"})</string>
 			<key>PayloadIdentifier</key>
 			<string>com.sanaei.l2tp.${sub.username}</string>
 			<key>PayloadType</key>
@@ -2752,11 +2774,16 @@ app.get("/api/sub/:token/wireguard-conf", (req, res) => {
 
   const inboundId = req.query.inboundId as string;
   const inbound = inboundId ? dbData.inbounds.find((i) => i.id === inboundId) : dbData.inbounds[0];
-  const serverIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const directServerIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const { host: serverIp, isBridge } = resolveConnectionHost(req, directServerIp);
   const serverPort = inbound?.wgPort || inbound?.port || dbData.settings?.wgServerPort || 51820;
   const serverPub = inbound?.wgServerPublicKey || dbData.settings?.wgServerPublicKey || sub.wireguardPublicKey;
 
-  const wgConf = `[Interface]
+  const wgConf = `# ----------------------------------------------------
+# Sanaei Smart Sub - WireGuard Profile
+# Routing Mode: ${isBridge ? `🌉 Bridge Gateway (Encapsulated -> ${inbound?.tag || '3x-ui node'})` : '⚡ Direct Node'}
+# ----------------------------------------------------
+[Interface]
 PrivateKey = ${sub.wireguardPrivateKey}
 Address = ${sub.wireguardAddress || "10.8.0.2/24"}
 DNS = ${sub.wireguardDns || "1.1.1.1, 8.8.8.8"}
@@ -2784,11 +2811,16 @@ app.get("/api/sub/:token/openvpn-ovpn", (req, res) => {
 
   const inboundId = req.query.inboundId as string;
   const inbound = inboundId ? dbData.inbounds.find((i) => i.id === inboundId) : dbData.inbounds[0];
-  const serverIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const directServerIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const { host: serverIp, isBridge } = resolveConnectionHost(req, directServerIp);
   const port = inbound?.openvpnPort || sub.openvpnPort || 1194;
   const proto = inbound?.openvpnProto || sub.openvpnProto || "udp";
 
-  const ovpnConfig = `client
+  const ovpnConfig = `# ----------------------------------------------------
+# Sanaei Smart Sub - OpenVPN Profile
+# Routing Mode: ${isBridge ? `🌉 Bridge Gateway (Encapsulated -> ${inbound?.tag || '3x-ui node'})` : '⚡ Direct Node'}
+# ----------------------------------------------------
+client
 dev tun
 proto ${proto}
 remote ${serverIp} ${port}

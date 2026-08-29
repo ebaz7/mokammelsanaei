@@ -84,6 +84,12 @@ export default function App() {
   const [wgServerDnsState, setWgServerDnsState] = useState("1.1.1.1, 8.8.8.8");
   const [isSavingSettings, setIsSavingSettings] = useState(false);
 
+  // V2Ray Middle Bridge Configuration & Direct Forwarding States
+  const [bridgeRoutingEnabled, setBridgeRoutingEnabled] = useState(true);
+  const [bridgeServerHost, setBridgeServerHost] = useState("");
+  const [bridgeUpstreamInboundId, setBridgeUpstreamInboundId] = useState("");
+  const [isSavingBridgeConfig, setIsSavingBridgeConfig] = useState(false);
+
   // Server IP / Domain Management State
   const [detectedPublicIp, setDetectedPublicIp] = useState("");
   const [isServerIpModalOpen, setIsServerIpModalOpen] = useState(false);
@@ -173,8 +179,21 @@ export default function App() {
     return inbounds[0];
   };
 
-  // Robust host resolution priority: Inbound server IP -> Global Setting -> Detected Public IP -> Window Hostname -> Fallback
-  const resolveEffectiveHost = (inboundHost?: string, subHost?: string): string => {
+  // Robust host resolution: When Bridge Mode is active, all client configs point directly to THIS Bridge Server!
+  const resolveEffectiveHost = (inboundHost?: string, subHost?: string, forceDirect?: boolean): string => {
+    // If bridge routing is enabled and not explicitly bypassed, client MUST connect to this bridge server
+    if (bridgeRoutingEnabled && !forceDirect) {
+      let bHost = (bridgeServerHost || "").trim();
+      if (!bHost || bHost === "127.0.0.1" || bHost === "142.250.74.46") {
+        if (typeof window !== "undefined" && window.location.hostname && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+          bHost = window.location.hostname;
+        }
+      }
+      if (bHost) {
+        return bHost.replace(/^https?:\/\//i, "").split("/")[0].split(":")[0].trim();
+      }
+    }
+
     let host = (inboundHost || subHost || l2tpServerIpState || detectedPublicIp || "").trim();
     if (!host || host === "127.0.0.1" || host === "142.250.74.46") {
       if (typeof window !== "undefined" && window.location.hostname && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
@@ -194,9 +213,10 @@ export default function App() {
   };
 
   // Helper generators for client-side instant profile downloads and QR codes
-  const getWireguardConf = (sub: SmartSubscription, customInbound?: InboundNode | null) => {
+  const getWireguardConf = (sub: SmartSubscription, customInbound?: InboundNode | null, forceDirect?: boolean) => {
     if (!sub) return "";
     const inb = customInbound || getActiveInbound();
+    const isBridge = bridgeRoutingEnabled && !forceDirect;
     const priv = ensureValidWgKey(sub.wireguardPrivateKey, `sub_priv_${sub.id || sub.username}`);
     const addr = sub.wireguardAddress && sub.wireguardAddress.includes("/") ? sub.wireguardAddress : "10.8.0.2/24";
     const dns = sub.wireguardDns || wgServerDnsState || "1.1.1.1, 8.8.8.8";
@@ -205,11 +225,17 @@ export default function App() {
     const candidatePub = inb?.wgServerPublicKey || wgServerPublicKeyState || sub.wireguardPublicKey;
     const serverPub = ensureValidWgKey(candidatePub, `srv_pub_${inb?.serverIp || "node1"}`);
     
-    // Clean Host/IP
-    const rawHost = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp);
+    // Clean Host/IP (Points to Bridge Server if bridge is active)
+    const rawHost = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp, forceDirect);
     const serverPort = inb?.wgPort || inb?.port || wgServerPortState || 51820;
     
-    return `[Interface]
+    return `# -----------------------------------------------------------------
+# Sanaei Smart Sub - WireGuard Client Profile
+# Routing Mode: ${isBridge ? `🌉 Bridge Gateway (Encapsulated -> ${inb?.tag || '3x-ui Node'})` : '⚡ Direct Remote Node'}
+# Ingress Host: ${rawHost} (Client connects here)
+# Egress Target: ${inb?.serverIp || 'Remote Node'} (${inb?.tag || 'Sanaei Inbound'})
+# -----------------------------------------------------------------
+[Interface]
 PrivateKey = ${priv}
 Address = ${addr}
 DNS = ${dns}
@@ -222,13 +248,15 @@ PersistentKeepalive = 25
 `;
   };
 
-  const getWindowsPbk = (sub: SmartSubscription, customInbound?: InboundNode | null) => {
+  const getWindowsPbk = (sub: SmartSubscription, customInbound?: InboundNode | null, forceDirect?: boolean) => {
     if (!sub) return "";
     const inb = customInbound || getActiveInbound();
+    const isBridge = bridgeRoutingEnabled && !forceDirect;
     const user = sub.username || "user";
-    const serverIp = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp);
+    const serverIp = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp, forceDirect);
     const psk = inb?.l2tpPsk || sub.l2tpPsk || l2tpPskState || "SanaeiL2TPSecureKey";
-    return `[L2TP_VPN_${user}]
+    return `# Sanaei Smart Sub - ${isBridge ? `[Bridge Mode -> ${inb?.tag || '3x-ui'}]` : 'Direct Node'}
+[L2TP_VPN_${user}]
 MEDIA=rastapi
 Port=VPN2-0
 Device=WAN Miniport (L2TP)
@@ -242,13 +270,14 @@ CustomDialFunc=
 `;
   };
 
-  const getAppleMobileConfig = (sub: SmartSubscription, customInbound?: InboundNode | null) => {
+  const getAppleMobileConfig = (sub: SmartSubscription, customInbound?: InboundNode | null, forceDirect?: boolean) => {
     if (!sub) return "";
     const inb = customInbound || getActiveInbound();
+    const isBridge = bridgeRoutingEnabled && !forceDirect;
     const user = sub.username || "user";
     const l2tpUser = sub.l2tpUser || user;
     const l2tpPass = sub.l2tpPass || "password";
-    const serverIp = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp);
+    const serverIp = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp, forceDirect);
     const psk = inb?.l2tpPsk || sub.l2tpPsk || l2tpPskState || "SanaeiL2TPSecureKey";
     let pskBase64 = "";
     try {
@@ -285,9 +314,9 @@ CustomDialFunc=
 				<string>${serverIp}</string>
 			</dict>
 			<key>PayloadDescription</key>
-			<string>Configures legacy and secure L2TP/IPSec VPN</string>
+			<string>Configures legacy and secure L2TP/IPSec VPN (${isBridge ? 'Bridge Mode' : 'Direct'})</string>
 			<key>PayloadDisplayName</key>
-			<string>L2TP VPN (${inb?.tag || user})</string>
+			<string>L2TP VPN (${isBridge ? '🌉 Bridge: ' : ''}${inb?.tag || user})</string>
 			<key>PayloadIdentifier</key>
 			<string>com.sanaei.l2tp.${user}</string>
 			<key>PayloadType</key>
@@ -318,16 +347,23 @@ CustomDialFunc=
 </plist>`;
   };
 
-  const getOpenVpnConfig = (sub: SmartSubscription, customInbound?: InboundNode | null) => {
+  const getOpenVpnConfig = (sub: SmartSubscription, customInbound?: InboundNode | null, forceDirect?: boolean) => {
     if (!sub) return "";
     const inb = customInbound || getActiveInbound();
-    const serverIp = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp);
+    const isBridge = bridgeRoutingEnabled && !forceDirect;
+    const serverIp = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp, forceDirect);
     const port = inb?.openvpnPort || sub.openvpnPort || 1194;
     const proto = inb?.openvpnProto || sub.openvpnProto || "udp";
     const user = sub.openvpnUser || `vpn_${sub.username || "user"}`;
     const pass = sub.openvpnPass || "SanaeiOVPNPass";
     
-    return `client
+    return `# -----------------------------------------------------------------
+# Sanaei Smart Sub - OpenVPN Profile
+# Routing Mode: ${isBridge ? `🌉 Bridge Gateway (Encapsulated -> ${inb?.tag || '3x-ui Node'})` : '⚡ Direct Remote Node'}
+# Ingress Host: ${serverIp} (Client connects here)
+# Egress Target: ${inb?.serverIp || 'Remote Node'} (${inb?.tag || 'Sanaei Inbound'})
+# -----------------------------------------------------------------
+client
 dev tun
 proto ${proto}
 remote ${serverIp} ${port}
@@ -601,6 +637,12 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
         setWgServerPublicKeyState(data.wgServerPublicKey || "");
         setWgServerPortState(data.wgServerPort || 51820);
         setWgServerDnsState(data.wgServerDns || "1.1.1.1, 8.8.8.8");
+        setBridgeRoutingEnabled(data.bridgeRoutingEnabled !== false);
+        setBridgeServerHost(data.bridgeServerIp || "");
+        if (data.bridgeUpstreamInboundId) {
+          setBridgeUpstreamInboundId(data.bridgeUpstreamInboundId);
+          setBridgeSelectedInboundId(data.bridgeUpstreamInboundId);
+        }
       }
     } catch (e) {
       console.error("Failed to load global VPN settings", e);
@@ -621,10 +663,13 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
           wgServerPublicKey: wgServerPublicKeyState,
           wgServerPort: wgServerPortState,
           wgServerDns: wgServerDnsState,
+          bridgeRoutingEnabled,
+          bridgeServerIp: bridgeServerHost,
+          bridgeUpstreamInboundId: bridgeSelectedInboundId || inbounds[0]?.id,
         }),
       });
       if (res.ok) {
-        alert(lang === "fa" ? "تنظیمات VPN با موفقیت ذخیره و همگام‌سازی شد." : "VPN settings successfully saved and synced.");
+        alert(lang === "fa" ? "تنظیمات VPN و پل با موفقیت ذخیره و همگام‌سازی شد." : "VPN & Bridge settings successfully saved and synced.");
         fetchSettings();
         fetchSubscriptions();
       } else {
@@ -635,6 +680,37 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
       alert("Error saving settings");
     } finally {
       setIsSavingSettings(false);
+    }
+  };
+
+  const handleSaveBridgeConfig = async (enabledState?: boolean, customHost?: string, targetInbId?: string) => {
+    setIsSavingBridgeConfig(true);
+    try {
+      const newEnabled = enabledState !== undefined ? enabledState : bridgeRoutingEnabled;
+      const newHost = customHost !== undefined ? customHost : (bridgeServerHost || window.location.hostname);
+      const newInbound = targetInbId !== undefined ? targetInbId : (bridgeSelectedInboundId || inbounds[0]?.id);
+
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          bridgeRoutingEnabled: newEnabled,
+          bridgeServerIp: newHost,
+          bridgeUpstreamInboundId: newInbound,
+        }),
+      });
+
+      if (res.ok) {
+        setBridgeRoutingEnabled(newEnabled);
+        setBridgeServerHost(newHost);
+        setBridgeUpstreamInboundId(newInbound);
+        await fetchSettings();
+        await fetchSubscriptions();
+      }
+    } catch (err) {
+      console.error("Failed to save bridge settings", err);
+    } finally {
+      setIsSavingBridgeConfig(false);
     }
   };
 
@@ -1102,7 +1178,51 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
         {/* ==================== TAB 1: DASHBOARD (SUBS & USERS) ==================== */}
         {currentTab === "dashboard" && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          <div className="space-y-6">
+            
+            {/* Bridge Routing Status Banner */}
+            <div className={`p-4 sm:p-5 rounded-3xl border flex items-center justify-between flex-wrap gap-4 transition-all shadow-xs ${
+              bridgeRoutingEnabled
+                ? "bg-linear-to-r from-amber-500/10 via-orange-500/5 to-indigo-500/10 border-amber-300"
+                : "bg-gray-50 border-gray-200"
+            }`}>
+              <div className="flex items-center gap-3.5">
+                <div className={`p-2.5 rounded-2xl text-white shadow-xs ${bridgeRoutingEnabled ? "bg-amber-500" : "bg-gray-400"}`}>
+                  <Zap className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-xs sm:text-sm font-bold text-gray-900">
+                      {bridgeRoutingEnabled
+                        ? (lang === "fa" ? "پل ارتباطی وی‌توری فعال است (ترافیک کلاینت‌ها از پل عبور می‌کند)" : "V2Ray Bridge Gateway is Active")
+                        : (lang === "fa" ? "حالت اتصال مستقیم به سرورهای خارجی (پل غیرفعال)" : "Direct Egress Mode (Bridge Inactive)")}
+                    </h4>
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                      bridgeRoutingEnabled ? "bg-emerald-100 text-emerald-800" : "bg-gray-200 text-gray-700"
+                    }`}>
+                      {bridgeRoutingEnabled ? (lang === "fa" ? "ضد فیلتر ۱۰۰٪" : "Tunnel Active") : (lang === "fa" ? "مستقیم" : "Direct")}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-gray-600 mt-1">
+                    {lang === "fa"
+                      ? `📍 آدرس ورودی کلاینت: (${resolveEffectiveHost()}) ➔ خروج رمزشده از نود: (${getActiveInbound()?.tag || 'سنایی'})`
+                      : `📍 Ingress Host: (${resolveEffectiveHost()}) ➔ Encrypted Egress: (${getActiveInbound()?.tag || 'Sanaei'})`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setCurrentTab("bridge")}
+                  className="text-xs font-bold px-3.5 py-2 rounded-xl bg-white border border-gray-200 text-gray-800 hover:bg-gray-50 shadow-2xs transition-all flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Settings className="h-3.5 w-3.5 text-gray-500" />
+                  <span>{lang === "fa" ? "مدیریت پل" : "Manage Bridge"}</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
             
             {/* Left Column: Create User and User List (7 Cols) */}
             <div className="lg:col-span-7 space-y-6">
@@ -2118,6 +2238,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
             </div>
           </div>
+        </div>
         )}
 
         {/* ==================== TAB: INBOUNDS (MULTI-INBOUND NODES MANAGEMENT) ==================== */}
@@ -2630,9 +2751,88 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
             {/* Upstream Node Selector & Custom Link */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
               
-              {/* Left Column (7 Cols): Node Selector & Live One-Click Installer */}
+              {/* Left Column (7 Cols): Ingress Host Config, Node Selector & Live One-Click Installer */}
               <div className="lg:col-span-7 space-y-6">
                 
+                {/* 0. Bridge Master Ingress Host & Routing Mode */}
+                <div className="bg-white rounded-3xl border border-amber-200 shadow-sm p-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="bg-amber-500 text-white p-2 rounded-xl shadow-xs">
+                        <Globe className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-gray-900">
+                          {lang === "fa" ? "تنظیمات ورودی پل و آدرس اتصال کلاینت‌ها" : "Bridge Ingress & Master Gateway Configuration"}
+                        </h3>
+                        <p className="text-[11px] text-gray-500">
+                          {lang === "fa" ? "مشخص کنید کلاینت‌ها برای اتصال به پل با چه آدرس و دامنه‌ای به این سرور وصل شوند" : "Set the ingress host where WireGuard/L2TP/OpenVPN clients connect"}
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      onClick={() => handleSaveBridgeConfig(!bridgeRoutingEnabled)}
+                      className={`text-xs font-bold px-3 py-1.5 rounded-xl border transition-all flex items-center gap-1.5 cursor-pointer ${
+                        bridgeRoutingEnabled
+                          ? "bg-emerald-50 text-emerald-800 border-emerald-300"
+                          : "bg-gray-100 text-gray-600 border-gray-300"
+                      }`}
+                    >
+                      <span className={`w-2 h-2 rounded-full ${bridgeRoutingEnabled ? 'bg-emerald-500 animate-pulse' : 'bg-gray-400'}`}></span>
+                      <span>{bridgeRoutingEnabled ? (lang === "fa" ? "پل فعال (مسیریابی از طریق پل)" : "Bridge Enabled") : (lang === "fa" ? "پل غیرفعال (اتصال مستقیم)" : "Direct Mode")}</span>
+                    </button>
+                  </div>
+
+                  <div className="space-y-3 pt-1">
+                    <label className="block text-xs font-bold text-gray-700">
+                      {lang === "fa" ? "آدرس IP یا دامنه پابلیک این پنل/سرور (Bridge Server IP / Domain):" : "Public Bridge IP / Domain (Ingress Host):"}
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={bridgeServerHost}
+                        onChange={(e) => setBridgeServerHost(e.target.value)}
+                        placeholder={window.location.hostname || "185.x.x.x or bridge.yourdomain.com"}
+                        className="flex-1 px-3.5 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-mono focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                        dir="ltr"
+                      />
+                      <button
+                        onClick={() => {
+                          const autoHost = window.location.hostname;
+                          if (autoHost && autoHost !== "localhost") {
+                            setBridgeServerHost(autoHost);
+                            handleSaveBridgeConfig(true, autoHost);
+                          } else if (detectedPublicIp) {
+                            setBridgeServerHost(detectedPublicIp);
+                            handleSaveBridgeConfig(true, detectedPublicIp);
+                          }
+                        }}
+                        className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-semibold rounded-xl transition-all cursor-pointer"
+                        title={lang === "fa" ? "تشخیص خودکار از آدرس مرورگر" : "Auto-detect Hostname"}
+                      >
+                        {lang === "fa" ? "تشخیص خودکار" : "Auto Detect"}
+                      </button>
+                      <button
+                        onClick={() => handleSaveBridgeConfig(bridgeRoutingEnabled, bridgeServerHost)}
+                        disabled={isSavingBridgeConfig}
+                        className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold rounded-xl shadow-xs transition-all cursor-pointer disabled:opacity-60"
+                      >
+                        {isSavingBridgeConfig ? (lang === "fa" ? "در حال ذخیره..." : "Saving...") : (lang === "fa" ? "ذخیره و اعمال" : "Save & Apply")}
+                      </button>
+                    </div>
+
+                    <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3 text-[11px] text-amber-950 flex items-start gap-2">
+                      <CheckCircle2 className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+                      <span>
+                        {lang === "fa"
+                          ? `با فعال بودن پل، تمام کانفیگ‌های خروجی وایروگارد، L2TP و اوپن‌وی‌پی‌ان کلاینت به جای آی‌پی سرور اصلی به آدرس (${resolveEffectiveHost()}) وصل می‌شوند و پکت‌ها از پل به نود سنایی (${getActiveInbound()?.tag || 'سنایی'}) تونل می‌گردند.`
+                          : `With Bridge Active, all client endpoints point to (${resolveEffectiveHost()}) and forward secretly to Sanaei Inbound (${getActiveInbound()?.tag || 'Sanaei'}).`}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
                 {/* 1. Select Upstream V2Ray Inbound from 3x-ui */}
                 <div className="bg-white rounded-3xl border border-gray-100 shadow-sm p-6 space-y-4">
                   <div className="flex items-center justify-between">
@@ -2833,6 +3033,44 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
     { "tag": "direct", "protocol": "freedom" }
   ]
 }`}
+                  </pre>
+                </div>
+
+                {/* Live Client Profile Routing Preview Card */}
+                <div className="bg-white rounded-3xl border border-gray-100 shadow-sm p-6 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Smartphone className="h-4 w-4 text-emerald-600" />
+                      <h3 className="text-sm font-bold text-gray-900">
+                        {lang === "fa" ? "پیش‌نمایش زنده اتصال کلاینت (WireGuard / L2TP)" : "Live Client Profile Preview"}
+                      </h3>
+                    </div>
+                    <span className="text-[10px] bg-amber-100 text-amber-900 font-bold px-2 py-0.5 rounded-full">
+                      {bridgeRoutingEnabled ? (lang === "fa" ? "آدرس پل فعال است" : "Bridge Ingress") : (lang === "fa" ? "اتصال مستقیم" : "Direct Ingress")}
+                    </span>
+                  </div>
+
+                  <p className="text-[11px] text-gray-500">
+                    {lang === "fa"
+                      ? `کلاینت شما بدون نیاز به وی‌توری به (${resolveEffectiveHost()}) متصل شده و ترافیک آن از (${getActiveInbound()?.tag || 'سنایی'}) خارج می‌شود:`
+                      : `Client connects to (${resolveEffectiveHost()}) and exits via (${getActiveInbound()?.tag || 'Sanaei'}):`}
+                  </p>
+
+                  <pre className="bg-slate-900 text-emerald-300 p-3.5 rounded-2xl font-mono text-[10px] max-h-52 overflow-y-auto leading-relaxed border border-slate-800" dir="ltr">
+{`# ----------------------------------------------------
+# Sanaei Smart Sub - WireGuard Profile
+# Routing Mode: ${bridgeRoutingEnabled ? `🌉 Bridge Gateway (Encapsulated -> ${getActiveInbound()?.tag || '3x-ui'})` : '⚡ Direct'}
+# ----------------------------------------------------
+[Interface]
+PrivateKey = (32-byte-secure-client-key)
+Address = 10.8.0.2/24
+DNS = 1.1.1.1, 8.8.8.8
+
+[Peer]
+PublicKey = ${getActiveInbound()?.wgServerPublicKey || 'f47s/9284jklsd...'}
+Endpoint = ${resolveEffectiveHost()}:${getActiveInbound()?.wgPort || wgServerPortState || 51820}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25`}
                   </pre>
                 </div>
 
