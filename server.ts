@@ -25,6 +25,7 @@ interface Panel {
   password: string;
   isActive: boolean;
   isMock?: boolean;
+  webBasePath?: string;
 }
 
 interface SmartSubscription {
@@ -107,16 +108,53 @@ function generateMockLinks(username: string, uuid: string): string[] {
   ];
 }
 
+function getPanelApiUrls(url: string, explicitBasePath?: string) {
+  let cleanUrl = url.replace(/\/$/, "");
+  let basePath = explicitBasePath ? explicitBasePath.trim() : "";
+  
+  // Auto-detect base path if it's already written inside the URL (e.g. http://1.2.3.4:2053/sanaei/)
+  try {
+    const parsedUrl = new URL(cleanUrl);
+    if (parsedUrl.pathname && parsedUrl.pathname !== "/" && !basePath) {
+      let path = parsedUrl.pathname.replace(/\/$/, "");
+      path = path.replace(/\/login$/, "");
+      path = path.replace(/\/panel$/, "");
+      path = path.replace(/\/panel\/api\/inbounds\/list$/, "");
+      
+      if (path && path !== "/") {
+        basePath = path;
+        cleanUrl = `${parsedUrl.protocol}//${parsedUrl.host}`;
+      }
+    }
+  } catch (e) {
+    // Ignore URL parse error for mock strings
+  }
+
+  if (basePath) {
+    if (!basePath.startsWith("/")) {
+      basePath = "/" + basePath;
+    }
+    basePath = basePath.replace(/\/$/, "");
+  }
+
+  return {
+    loginUrl: `${cleanUrl}${basePath}/login`,
+    inboundsUrl: `${cleanUrl}${basePath}/panel/api/inbounds/list`,
+    host: cleanUrl,
+    basePath
+  };
+}
+
 async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: string): Promise<string[]> {
   if (panel.isMock || panel.url.includes("mock") || panel.url.includes("sanaei.xyz")) {
     return generateMockLinks(username, uuid);
   }
 
   try {
-    const cleanUrl = panel.url.replace(/\/$/, "");
+    const { loginUrl, inboundsUrl, host } = getPanelApiUrls(panel.url, panel.webBasePath);
     
     // Authenticate with 3x-ui to get a session cookie
-    const loginRes = await fetch(`${cleanUrl}/login`, {
+    const loginRes = await fetch(loginUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -142,7 +180,7 @@ async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: str
     const sessionCookie = setCookie.split(";")[0];
 
     // Request active inbounds list
-    const inboundsRes = await fetch(`${cleanUrl}/panel/api/inbounds/list`, {
+    const inboundsRes = await fetch(inboundsUrl, {
       method: "GET",
       headers: {
         "Cookie": sessionCookie,
@@ -160,7 +198,7 @@ async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: str
       return generateMockLinks(username, uuid);
     }
 
-    const domainOrIp = new URL(panel.url).hostname;
+    const domainOrIp = new URL(host).hostname;
     const nodes: string[] = [];
 
     // Map active inbounds from 3x-ui
@@ -223,7 +261,7 @@ app.get("/api/panels", (req, res) => {
 });
 
 app.post("/api/panels", (req, res) => {
-  const { name, url, username, password, isMock } = req.body;
+  const { name, url, username, password, isMock, webBasePath } = req.body;
   if (!name || !url) {
     res.status(400).json({ error: "Name and URL are required" });
     return;
@@ -237,6 +275,7 @@ app.post("/api/panels", (req, res) => {
     password: password || "",
     isActive: true,
     isMock: !!isMock,
+    webBasePath: webBasePath || "",
   };
 
   dbData.panels.push(newPanel);
@@ -255,9 +294,163 @@ app.delete("/api/panels/:id", (req, res) => {
   }
 });
 
+// 1.5. Sync Panel Users (Extract clients from Sanaei and auto-create smart subscriptions)
+app.post("/api/panels/:id/sync", async (req, res) => {
+  const panelId = req.params.id;
+  const panel = dbData.panels.find((p) => p.id === panelId);
+  if (!panel) {
+    res.status(404).json({ error: "Panel not found" });
+    return;
+  }
+
+  let clientsToSync: Array<{ email: string; id: string }> = [];
+
+  if (panel.isMock || panel.url.includes("mock") || panel.url.includes("sanaei.xyz")) {
+    // Generate mock clients for the demo panel
+    clientsToSync = [
+      { email: "alex_premium", id: "5a4df3b2-7c8d-4e9a-bf0c-d3e1f2a3b4c5" },
+      { email: "reza_secure", id: "9b8c7d6e-5f4e-3d2c-1b0a-9f8e7d6c5b4a" },
+      { email: "sara_ultra", id: "3f2e1d0c-9b8a-7f6e-5d4c-3b2a1f0e9d8c" }
+    ];
+  } else {
+    // Real 3x-ui API Call
+    try {
+      const { loginUrl, inboundsUrl } = getPanelApiUrls(panel.url, panel.webBasePath);
+      
+      const loginRes = await fetch(loginUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          username: panel.username,
+          password: panel.password,
+        }),
+      });
+
+      if (!loginRes.ok) {
+        res.status(401).json({ error: "Authentication with Sanaei panel failed during sync" });
+        return;
+      }
+
+      const setCookie = loginRes.headers.get("set-cookie");
+      if (!setCookie) {
+        res.status(500).json({ error: "No session cookie returned from Sanaei panel during sync" });
+        return;
+      }
+
+      const sessionCookie = setCookie.split(";")[0];
+
+      const inboundsRes = await fetch(inboundsUrl, {
+        method: "GET",
+        headers: {
+          "Cookie": sessionCookie,
+        },
+      });
+
+      if (!inboundsRes.ok) {
+        res.status(500).json({ error: "Failed to fetch inbounds from Sanaei panel during sync" });
+        return;
+      }
+
+      const data = await inboundsRes.json();
+      if (data && data.success && Array.isArray(data.obj)) {
+        for (const inbound of data.obj) {
+          const settings = typeof inbound.settings === "string" ? JSON.parse(inbound.settings) : inbound.settings;
+          if (settings && Array.isArray(settings.clients)) {
+            for (const client of settings.clients) {
+              if (client.email) {
+                clientsToSync.push({
+                  email: client.email,
+                  id: client.id || client.password || Math.random().toString(36).substr(2, 9)
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      console.error("[Sync API Error]:", err);
+      res.status(500).json({ error: `Connection failed: ${err.message}` });
+      return;
+    }
+  }
+
+  // Now, for every fetched client, check if we already have it. If not, auto-create a smart subscription!
+  let syncedCount = 0;
+  let alreadyExistsCount = 0;
+  
+  // Extract server hostname or IP for configuration
+  let fallbackIp = "142.250.74.46";
+  try {
+    const parsed = new URL(panel.url);
+    fallbackIp = parsed.hostname;
+  } catch (e) {
+    // fallback
+  }
+
+  for (const client of clientsToSync) {
+    const cleanUser = client.email.trim();
+    // Check if subscription already exists for this panel and username
+    const exists = dbData.subscriptions.some(
+      (s) => s.panelId === panelId && s.username.toLowerCase() === cleanUser.toLowerCase()
+    );
+
+    if (exists) {
+      alreadyExistsCount++;
+      continue;
+    }
+
+    // Auto-generate legacy and new L2TP, IKEv2, and OpenVPN credentials!
+    const token = "sub_" + Math.random().toString(36).substr(2, 16);
+    const cleanUsernameForCreds = cleanUser.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const l2tpUser = `vpn_${cleanUsernameForCreds}`;
+    const l2tpPass = Math.random().toString(36).substr(2, 10).toUpperCase();
+
+    const newSub: SmartSubscription = {
+      id: token,
+      panelId,
+      panelName: panel.name,
+      username: cleanUser,
+      uuid: client.id,
+      inboundId: Math.floor(Math.random() * 100) + 1,
+      createdAt: new Date().toISOString(),
+      l2tpUser,
+      l2tpPass,
+      l2tpPsk: "SanaeiL2TPSecureKey",
+      l2tpServerIp: fallbackIp,
+      wireguardPrivateKey: Buffer.from(Math.random().toString(36).substr(2, 16)).toString("base64").substr(0, 44),
+      wireguardPublicKey: Buffer.from(Math.random().toString(36).substr(2, 16)).toString("base64").substr(0, 44),
+      wireguardAddress: "10.0.0.2/24",
+      wireguardDns: "1.1.1.1, 8.8.8.8",
+      openvpnUser: `vpn_${cleanUsernameForCreds}`,
+      openvpnPass: Math.random().toString(36).substr(2, 10).toUpperCase(),
+      openvpnPort: 1194,
+      openvpnProto: "udp",
+      autoSwitchEnabled: true,
+      lastUpdated: new Date().toISOString(),
+    };
+
+    dbData.subscriptions.push(newSub);
+    syncedCount++;
+  }
+
+  if (syncedCount > 0) {
+    saveDb();
+  }
+
+  res.json({
+    success: true,
+    syncedCount,
+    alreadyExistsCount,
+    totalFetched: clientsToSync.length,
+    message: `Successfully synced ${syncedCount} new users from ${panel.name}.`
+  });
+});
+
 // 2. Test Connection
 app.post("/api/panels/test", async (req, res) => {
-  const { url, username, password, isMock } = req.body;
+  const { url, username, password, isMock, webBasePath } = req.body;
   if (isMock || url?.includes("sanaei.xyz") || url?.includes("mock")) {
     // Simulate connection lag
     await new Promise((resolve) => setTimeout(resolve, 800));
@@ -272,11 +465,11 @@ app.post("/api/panels/test", async (req, res) => {
   try {
     // Attempt real login request to 3x-ui
     // 3x-ui login typically responds on /login with x-www-form-urlencoded
-    const cleanUrl = url.replace(/\/$/, "");
+    const { loginUrl } = getPanelApiUrls(url, webBasePath);
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 6000);
 
-    const loginRes = await fetch(`${cleanUrl}/login`, {
+    const loginRes = await fetch(loginUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",

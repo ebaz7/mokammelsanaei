@@ -6,6 +6,7 @@ export interface Panel {
   password: string;
   isActive: boolean;
   isMock?: boolean;
+  webBasePath?: string;
 }
 
 export interface SmartSubscription {

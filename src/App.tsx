@@ -44,12 +44,15 @@ export default function App() {
   const [newPanelUrl, setNewPanelUrl] = useState("");
   const [newPanelUser, setNewPanelUser] = useState("");
   const [newPanelPass, setNewPanelPass] = useState("");
+  const [newPanelWebBasePath, setNewPanelWebBasePath] = useState("");
   const [isTestingPanel, setIsTestingPanel] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Subscriptions state
   const [subs, setSubs] = useState<SmartSubscription[]>([]);
   const [selectedSub, setSelectedSub] = useState<SmartSubscription | null>(null);
+  const [syncingPanelId, setSyncingPanelId] = useState<string | null>(null);
+  const [syncFeedback, setSyncFeedback] = useState<{ [panelId: string]: string }>({});
   
   // Create User State
   const [newUserEmail, setNewUserEmail] = useState("");
@@ -142,6 +145,7 @@ export default function App() {
           url: newPanelUrl,
           username: newPanelUser,
           password: newPanelPass,
+          webBasePath: newPanelWebBasePath,
           isMock: newPanelUrl.includes("mock") || newPanelUrl.includes("demo"),
         }),
       });
@@ -150,6 +154,7 @@ export default function App() {
         setNewPanelUrl("");
         setNewPanelUser("");
         setNewPanelPass("");
+        setNewPanelWebBasePath("");
         setTestResult(null);
         await fetchPanels();
       }
@@ -191,6 +196,7 @@ export default function App() {
           url: newPanelUrl,
           username: newPanelUser,
           password: newPanelPass,
+          webBasePath: newPanelWebBasePath,
         }),
       });
       const data = await res.json();
@@ -205,6 +211,37 @@ export default function App() {
       });
     } finally {
       setIsTestingPanel(false);
+    }
+  };
+
+  // Sync Panel Users
+  const handleSyncPanel = async (panelId: string) => {
+    setSyncingPanelId(panelId);
+    try {
+      const res = await fetch(`/api/panels/${panelId}/sync`, { method: "POST" });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setSyncFeedback(prev => ({
+          ...prev,
+          [panelId]: lang === "fa" 
+            ? `موفق: ${data.syncedCount} کاربر جدید اضافه شد!` 
+            : `Success: ${data.syncedCount} new users synced!`
+        }));
+        await fetchSubscriptions();
+        setTimeout(() => {
+          setSyncFeedback(prev => {
+            const updated = { ...prev };
+            delete updated[panelId];
+            return updated;
+          });
+        }, 5000);
+      } else {
+        alert(data.error || "Failed to sync panel users.");
+      }
+    } catch (err: any) {
+      alert(`Error: ${err.message || "Failed to sync"}`);
+    } finally {
+      setSyncingPanelId(null);
     }
   };
 
@@ -1003,35 +1040,67 @@ export default function App() {
                 ) : (
                   <div className="space-y-4">
                     {panels.map((p) => (
-                      <div key={p.id} className="border border-gray-100 bg-[#F9FAFB]/50 rounded-xl p-4 flex items-center justify-between flex-wrap gap-4">
-                        <div className="flex items-center gap-3">
-                          <div className="bg-gray-100 p-2.5 rounded-xl text-gray-500">
-                            <Server className="h-5 w-5" />
-                          </div>
-                          <div>
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <h4 className="text-xs font-bold text-gray-900">{p.name}</h4>
-                              <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded-md ${
-                                p.isMock ? "bg-amber-50 text-amber-700 border border-amber-100" : "bg-indigo-50 text-[#4F46E5] border border-indigo-100"
-                              }`}>
-                                {p.isMock ? (lang === "fa" ? "شبیه‌ساز فعال" : "Simulated Mode") : (lang === "fa" ? "سرور زنده" : "Live API Server")}
-                              </span>
+                      <div key={p.id} className="border border-gray-100 bg-[#F9FAFB]/50 rounded-xl p-4 flex flex-col gap-3">
+                        <div className="flex items-center justify-between flex-wrap gap-4">
+                          <div className="flex items-center gap-3">
+                            <div className="bg-gray-100 p-2.5 rounded-xl text-gray-500">
+                              <Server className="h-5 w-5" />
                             </div>
-                            <code className="text-[10px] text-gray-400 font-mono mt-1 block">{p.url}</code>
+                            <div>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <h4 className="text-xs font-bold text-gray-900">{p.name}</h4>
+                                <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded-md ${
+                                  p.isMock ? "bg-amber-50 text-amber-700 border border-amber-100" : "bg-indigo-50 text-[#4F46E5] border border-indigo-100"
+                                }`}>
+                                  {p.isMock ? (lang === "fa" ? "شبیه‌ساز فعال" : "Simulated Mode") : (lang === "fa" ? "سرور زنده" : "Live API Server")}
+                                </span>
+                              </div>
+                              <code className="text-[10px] text-gray-400 font-mono mt-1 block">
+                                {p.url}
+                                {p.webBasePath ? ` (Base: ${p.webBasePath})` : ""}
+                              </code>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <div className="text-right text-[10px] text-gray-500">
+                              <span className="block">{lang === "fa" ? "کاربر" : "User"}: <strong className="text-gray-700">{p.username}</strong></span>
+                              <span className="block">{lang === "fa" ? "پروتکل" : "Proto"}: <strong className="text-gray-700">HTTPS/API</strong></span>
+                            </div>
+                            <button
+                              onClick={() => handleDeletePanel(p.id)}
+                              className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                              title="Delete Panel"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-3">
-                          <div className="text-right text-[10px] text-gray-500">
-                            <span className="block">{lang === "fa" ? "کاربر" : "User"}: <strong className="text-gray-700">{p.username}</strong></span>
-                            <span className="block">{lang === "fa" ? "پروتکل" : "Proto"}: <strong className="text-gray-700">HTTPS/API</strong></span>
-                          </div>
+                        {/* Interactive Sync Sub-section */}
+                        <div className="w-full flex items-center justify-between border-t border-gray-100 pt-3 flex-wrap gap-2">
+                          {syncFeedback[p.id] ? (
+                            <span className="text-[10px] font-semibold text-green-600 animate-bounce">
+                              {syncFeedback[p.id]}
+                            </span>
+                          ) : (
+                            <span className="text-[9px] text-gray-400 leading-relaxed">
+                              {lang === "fa" 
+                                ? "💡 همگام‌سازی تمام کاربران سنایی با این پنل جهت ساخت خودکار کانفیگ‌ها" 
+                                : "💡 Auto-sync all clients from this panel to generate L2TP/IKEv2 & OVPN"}
+                            </span>
+                          )}
                           <button
-                            onClick={() => handleDeletePanel(p.id)}
-                            className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
-                            title="Delete Panel"
+                            onClick={() => handleSyncPanel(p.id)}
+                            disabled={syncingPanelId === p.id}
+                            className={`flex items-center gap-1.5 text-[10px] font-bold px-3 py-1.5 rounded-lg transition-all ${
+                              syncingPanelId === p.id
+                                ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                                : "bg-green-50 text-green-700 hover:bg-green-100 border border-green-100"
+                            }`}
                           >
-                            <Trash2 className="h-4 w-4" />
+                            <RefreshCw className={`h-3 w-3 ${syncingPanelId === p.id ? "animate-spin" : ""}`} />
+                            {lang === "fa" ? "همگام‌سازی کاربران" : "Sync Clients"}
                           </button>
                         </div>
                       </div>
@@ -1080,6 +1149,22 @@ export default function App() {
                     />
                     <p className="text-[9px] text-gray-400 mt-1">
                       {lang === "fa" ? "برای شبیه‌سازی و تست بدون پنل واقعی، عبارت 'mock' یا آدرس پیشفرض دمو را بگذارید" : "Tip: Enter 'mock' to run in simulated mode without a live 3x-ui panel."}
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-gray-500 mb-1.5">
+                      {lang === "fa" ? "پیشوند مسیر پنل (Web Base Path / API) - اختیاری" : "Panel Web Base Path / API Prefix (Optional)"}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="e.g. /sanaei or /admin"
+                      value={newPanelWebBasePath}
+                      onChange={(e) => setNewPanelWebBasePath(e.target.value)}
+                      className="w-full text-xs rounded-xl border border-gray-200 py-2.5 px-3 focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/20 focus:border-[#4F46E5] transition-all font-mono"
+                    />
+                    <p className="text-[9px] text-gray-400 mt-1">
+                      {lang === "fa" ? "اگر برای پنل سنایی خود مسیر اختصاصی (Base Path) ست کرده‌اید، آن را اینجا وارد کنید" : "If you configured a custom Web Base Path / URL prefix in Sanaei settings, enter it here."}
                     </p>
                   </div>
 

@@ -84,7 +84,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=${INSTALL_DIR}
-ExecStart=$(command -v npm) start
+ExecStart=$(command -v node) dist/server.cjs
 Restart=on-failure
 Environment=NODE_ENV=production
 Environment=PORT=${CUSTOM_PORT}
