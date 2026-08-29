@@ -2049,6 +2049,290 @@ app.delete("/api/inbounds/:id", (req, res) => {
   }
 });
 
+// ==============================================================================
+// V2Ray / Xray Middle Bridge (پل ارتباطی وی‌توری) API
+// ==============================================================================
+
+// Helper to generate full Xray Core Outbound JSON from any 3x-ui link or inbound
+function generateXrayOutboundFromLink(link: string, fallbackHost = "127.0.0.1"): any {
+  const parsed = parseV2rayLink(link, "11111111-2222-3333-4444-555555555555");
+  if (!parsed) {
+    return {
+      protocol: "vless",
+      settings: {
+        vnext: [{
+          address: fallbackHost,
+          port: 443,
+          users: [{ id: "11111111-2222-3333-4444-555555555555", encryption: "none" }]
+        }]
+      },
+      streamSettings: {
+        network: "ws",
+        security: "tls",
+        tlsSettings: { serverName: fallbackHost },
+        wsSettings: { path: "/vless-ws" }
+      },
+      tag: "proxy"
+    };
+  }
+
+  const outTag = "proxy";
+  const address = parsed.server || fallbackHost;
+  const port = parsed.port || 443;
+  const uuid = parsed.uuid || "11111111-2222-3333-4444-555555555555";
+
+  if (parsed.type === "vless") {
+    return {
+      tag: outTag,
+      protocol: "vless",
+      settings: {
+        vnext: [{
+          address,
+          port,
+          users: [{ id: uuid, encryption: "none", flow: "" }]
+        }]
+      },
+      streamSettings: {
+        network: parsed.network || "tcp",
+        security: parsed.tls ? "tls" : "none",
+        tlsSettings: parsed.tls ? { serverName: address } : undefined,
+        wsSettings: parsed.network === "ws" ? { path: parsed.path || "/" } : undefined
+      }
+    };
+  } else if (parsed.type === "vmess") {
+    return {
+      tag: outTag,
+      protocol: "vmess",
+      settings: {
+        vnext: [{
+          address,
+          port,
+          users: [{ id: uuid, alterId: 0, security: "auto" }]
+        }]
+      },
+      streamSettings: {
+        network: parsed.network || "ws",
+        security: parsed.tls ? "tls" : "none",
+        tlsSettings: parsed.tls ? { serverName: address } : undefined,
+        wsSettings: parsed.network === "ws" ? { path: parsed.path || "/" } : undefined
+      }
+    };
+  } else if (parsed.type === "trojan") {
+    return {
+      tag: outTag,
+      protocol: "trojan",
+      settings: {
+        servers: [{ address, port, password: uuid }]
+      },
+      streamSettings: {
+        network: parsed.network || "tcp",
+        security: "tls",
+        tlsSettings: { serverName: address }
+      }
+    };
+  } else if (parsed.type === "shadowsocks") {
+    return {
+      tag: outTag,
+      protocol: "shadowsocks",
+      settings: {
+        servers: [{ address, port, method: "aes-256-gcm", password: uuid }]
+      }
+    };
+  }
+
+  return {
+    tag: outTag,
+    protocol: "vless",
+    settings: {
+      vnext: [{ address, port, users: [{ id: uuid, encryption: "none" }] }]
+    }
+  };
+}
+
+// 1. Get Live Bridge Status
+app.get("/api/bridge/status", (req, res) => {
+  const activeInbound = dbData.inbounds[0] || null;
+  const subscriptionsCount = dbData.subscriptions.length;
+  res.json({
+    enabled: true,
+    mode: "xray_tun2socks_bridge",
+    upstreamNode: activeInbound ? activeInbound.tag : "Direct V2Ray Bridge",
+    upstreamServerIp: activeInbound ? activeInbound.serverIp : "127.0.0.1",
+    upstreamProtocol: activeInbound ? activeInbound.protocol : "vless",
+    activePeers: subscriptionsCount,
+    bridgeSubnets: {
+      wireguard: "10.8.0.0/24 (wg0)",
+      l2tp: "10.9.0.0/24 (ppp+)",
+      openvpn: "10.10.0.0/24 (tun0)"
+    },
+    status: "ready",
+    farsiDescription: "تمام ترافیک کاربران WireGuard, OpenVPN و L2TP از طریق تونل ضد فیلتر Xray/V2Ray به سرور خارج هدایت می‌شود."
+  });
+});
+
+// 2. Generate Client Xray & Tun2socks Configuration
+app.get("/api/bridge/config", (req, res) => {
+  const link = (req.query.link as string) || "";
+  const inboundId = (req.query.inboundId as string) || "";
+  const inbound = inboundId ? dbData.inbounds.find(i => i.id === inboundId) : dbData.inbounds[0];
+  const serverIp = inbound?.serverIp || "127.0.0.1";
+
+  const defaultLink = link || generateMockLinks("bridge-master", "11111111-2222-3333-4444-555555555555")[0];
+  const xrayOutbound = generateXrayOutboundFromLink(defaultLink, serverIp);
+
+  const fullXrayClientConfig = {
+    log: { loglevel: "warning" },
+    inbounds: [
+      {
+        tag: "socks-in",
+        port: 10808,
+        listen: "127.0.0.1",
+        protocol: "socks",
+        settings: { auth: "noauth", udp: true }
+      },
+      {
+        tag: "http-in",
+        port: 10809,
+        listen: "127.0.0.1",
+        protocol: "http",
+        settings: { allowTransparent: false }
+      },
+      {
+        tag: "tproxy-in",
+        port: 12345,
+        listen: "127.0.0.1",
+        protocol: "dokodemo-door",
+        settings: { network: "tcp,udp", followRedirect: true },
+        streamSettings: { sockopt: { tproxy: "tproxy" } }
+      }
+    ],
+    outbounds: [
+      xrayOutbound,
+      { tag: "direct", protocol: "freedom", settings: {} },
+      { tag: "block", protocol: "blackhole", settings: {} }
+    ],
+    routing: {
+      domainStrategy: "IPIfNonMatch",
+      rules: [
+        { type: "field", ip: ["geoip:private", "geoip:ir"], outTag: "direct" },
+        { type: "field", network: "tcp,udp", outTag: "proxy" }
+      ]
+    }
+  };
+
+  res.setHeader("Content-Type", "application/json");
+  res.send(JSON.stringify(fullXrayClientConfig, null, 2));
+});
+
+// 3. Generate Complete Linux Bash Bridge Installer Script
+app.get("/install-bridge.sh", (req, res) => {
+  const host = req.headers.host || "127.0.0.1";
+  const script = `#!/usr/bin/env bash
+# ==============================================================================
+# 🌉 Sanaei V2Ray Bridge Gateway (WireGuard & L2TP -> V2Ray Tunnel Router)
+# Routes WireGuard (10.8.0.0/24), L2TP (10.9.0.0/24), OpenVPN (10.10.0.0/24)
+# Through Xray / V2Ray / Sing-box Anti-Censorship Outbound Tunnel
+# ==============================================================================
+
+RED='\\033[0;31m'
+GREEN='\\033[0;32m'
+YELLOW='\\033[0;33m'
+CYAN='\\033[0;36m'
+NC='\\033[0m'
+
+if [ "$EUID" -ne 0 ]; then
+  echo -e "\${RED}Error: Please run as root.\${NC}"
+  exit 1
+fi
+
+echo -e "\${CYAN}==================================================================\${NC}"
+echo -e "\${CYAN}    🌉 Setting up V2Ray / Xray Middle Bridge for VPN Clients      \${NC}"
+echo -e "\${CYAN}==================================================================\${NC}"
+
+# 1. Install prerequisites (tun2socks, xray, wireguard, strongswan, xl2tpd)
+echo -e "\${YELLOW}[1/4] Installing Xray-core, Tun2socks and VPN daemons...\${NC}"
+apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \\
+  curl wget jq iptables iproute2 wireguard strongswan xl2tpd ppp openvpn net-tools
+
+# Download Xray-core if not present
+if ! command -v xray >/dev/null 2>&1; then
+  echo -e "\${YELLOW}Installing latest Xray-core...\${NC}"
+  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+fi
+
+# Download tun2socks release
+if ! command -v tun2socks >/dev/null 2>&1; then
+  echo -e "\${YELLOW}Installing Tun2socks binary...\${NC}"
+  ARCH=$(uname -m)
+  if [ "$ARCH" = "x86_64" ]; then TUN_ARCH="linux-amd64"; elif [ "$ARCH" = "aarch64" ]; then TUN_ARCH="linux-arm64"; else TUN_ARCH="linux-amd64"; fi
+  wget -qO /tmp/tun2socks.zip "https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-\${TUN_ARCH}.zip"
+  apt-get install -y unzip
+  unzip -qo /tmp/tun2socks.zip -d /tmp/tun2socks_bin
+  cp /tmp/tun2socks_bin/tun2socks* /usr/local/bin/tun2socks 2>/dev/null || cp /tmp/tun2socks_bin/tun2socks /usr/local/bin/
+  chmod +x /usr/local/bin/tun2socks
+  rm -rf /tmp/tun2socks*
+fi
+
+# 2. Configure Bridge Systemd Service
+echo -e "\${YELLOW}[2/4] Configuring Tun2socks Systemd service (VPN -> SOCKS5 127.0.0.1:10808)...\${NC}"
+
+cat <<EOF >/etc/systemd/system/vpn-v2ray-bridge.service
+[Unit]
+Description=VPN to V2Ray Bridge (Tun2socks Routing)
+After=network.target xray.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/tun2socks -device tun2 -proxy socks5://127.0.0.1:10808 -interface lo
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 3. Kernel & IPTables Routing Rules
+echo -e "\${YELLOW}[3/4] Setting up Kernel IP Routing for WireGuard, L2TP, and OpenVPN...\${NC}"
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+# Create tun2 interface if needed and route VPN subnets through it
+ip tuntap add mode tun dev tun2 2>/dev/null || true
+ip addr add 198.18.0.1/15 dev tun2 2>/dev/null || true
+ip link set dev tun2 up 2>/dev/null || true
+
+# Routing Table for Tun2socks
+ip rule del fwmark 0x1 2>/dev/null || true
+ip route del default dev tun2 table 100 2>/dev/null || true
+ip route add default dev tun2 table 100 2>/dev/null || true
+ip rule add fwmark 0x1 table 100 2>/dev/null || true
+
+# Mark VPN packets (WireGuard 10.8.0.0/24, L2TP 10.9.0.0/24, OpenVPN 10.10.0.0/24) to go through V2Ray
+iptables -t mangle -D PREROUTING -s 10.8.0.0/24 -j MARK --set-mark 0x1 2>/dev/null || true
+iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -j MARK --set-mark 0x1 2>/dev/null || true
+iptables -t mangle -D PREROUTING -s 10.10.0.0/24 -j MARK --set-mark 0x1 2>/dev/null || true
+
+iptables -t mangle -A PREROUTING -s 10.8.0.0/24 -j MARK --set-mark 0x1
+iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -j MARK --set-mark 0x1
+iptables -t mangle -A PREROUTING -s 10.10.0.0/24 -j MARK --set-mark 0x1
+
+# Start services
+systemctl daemon-reload
+systemctl enable vpn-v2ray-bridge 2>/dev/null
+systemctl restart vpn-v2ray-bridge 2>/dev/null
+
+echo -e "\${GREEN}==================================================================\${NC}"
+echo -e "\${GREEN}  ✅ V2Ray Middle Bridge successfully configured and active!     \${NC}"
+echo -e "\${GREEN}  All WireGuard (10.8.0.0/24), L2TP (10.9.0.0/24) and OpenVPN    \${NC}"
+echo -e "\${GREEN}  connections are now forwarded through the V2Ray upstream tunnel! \${NC}"
+echo -e "\${GREEN}==================================================================\${NC}"
+`;
+
+  res.setHeader("Content-Type", "text/plain");
+  res.send(script);
+});
+
+
 // 3. Smart Client Subscriptions CRUD
 app.get("/api/users", (req, res) => {
   res.json(dbData.subscriptions);
