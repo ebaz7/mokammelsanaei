@@ -7,6 +7,7 @@ export interface Panel {
   isActive: boolean;
   isMock?: boolean;
   webBasePath?: string;
+  apiToken?: string;
 }
 
 export interface SmartSubscription {

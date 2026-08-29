@@ -45,6 +45,8 @@ export default function App() {
   const [newPanelUser, setNewPanelUser] = useState("");
   const [newPanelPass, setNewPanelPass] = useState("");
   const [newPanelWebBasePath, setNewPanelWebBasePath] = useState("");
+  const [authMethod, setAuthMethod] = useState<"credentials" | "token">("credentials");
+  const [newPanelApiToken, setNewPanelApiToken] = useState("");
   const [isTestingPanel, setIsTestingPanel] = useState(false);
   const [testResult, setTestResult] = useState<{
     success: boolean;
@@ -156,8 +158,9 @@ export default function App() {
         body: JSON.stringify({
           name: newPanelName,
           url: newPanelUrl,
-          username: newPanelUser,
-          password: newPanelPass,
+          username: authMethod === "token" ? "" : newPanelUser,
+          password: authMethod === "token" ? "" : newPanelPass,
+          apiToken: authMethod === "token" ? newPanelApiToken : "",
           webBasePath: newPanelWebBasePath,
           isMock: newPanelUrl.includes("mock") || newPanelUrl.includes("demo"),
         }),
@@ -168,6 +171,7 @@ export default function App() {
         setNewPanelUser("");
         setNewPanelPass("");
         setNewPanelWebBasePath("");
+        setNewPanelApiToken("");
         setTestResult(null);
         await fetchPanels();
       }
@@ -207,8 +211,9 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url: newPanelUrl,
-          username: newPanelUser,
-          password: newPanelPass,
+          username: authMethod === "token" ? "" : newPanelUser,
+          password: authMethod === "token" ? "" : newPanelPass,
+          apiToken: authMethod === "token" ? newPanelApiToken : "",
           webBasePath: newPanelWebBasePath,
         }),
       });
@@ -1182,33 +1187,85 @@ export default function App() {
                     </p>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-semibold text-gray-500 mb-1.5">
-                        {lang === "fa" ? "نام کاربری پنل" : "Username"}
-                      </label>
-                      <input
-                        type="text"
-                        placeholder="admin"
-                        value={newPanelUser}
-                        onChange={(e) => setNewPanelUser(e.target.value)}
-                        className="w-full text-xs rounded-xl border border-gray-200 py-2.5 px-3 focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/20 focus:border-[#4F46E5] transition-all"
-                      />
+                  {/* Authentication Method Selection */}
+                  <div className="space-y-1.5">
+                    <label className="block text-xs font-semibold text-gray-500">
+                      {lang === "fa" ? "روش احراز هویت با پنل" : "Authentication Method"}
+                    </label>
+                    <div className="grid grid-cols-2 gap-1.5 bg-gray-50 p-1 rounded-xl border border-gray-100">
+                      <button
+                        type="button"
+                        onClick={() => setAuthMethod("credentials")}
+                        className={`text-xs py-1.5 px-3 rounded-lg font-medium transition-all ${
+                          authMethod === "credentials"
+                            ? "bg-white text-indigo-600 shadow-sm border border-gray-100"
+                            : "text-gray-500 hover:text-gray-900"
+                        }`}
+                      >
+                        {lang === "fa" ? "نام‌کاربری و رمز عبور" : "Username & Password"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAuthMethod("token")}
+                        className={`text-xs py-1.5 px-3 rounded-lg font-medium transition-all ${
+                          authMethod === "token"
+                            ? "bg-white text-indigo-600 shadow-sm border border-gray-100"
+                            : "text-gray-500 hover:text-gray-900"
+                        }`}
+                      >
+                        {lang === "fa" ? "توکن امن ای‌پی‌آی (Token)" : "API Token"}
+                      </button>
                     </div>
+                  </div>
 
+                  {authMethod === "token" ? (
                     <div>
                       <label className="block text-xs font-semibold text-gray-500 mb-1.5">
-                        {lang === "fa" ? "رمز عبور پنل" : "Password"}
+                        {lang === "fa" ? "توکن اختصاصی ای‌پی‌آی (API Token)" : "API Token / Bearer Token"}
                       </label>
                       <input
                         type="password"
-                        placeholder="••••••••"
-                        value={newPanelPass}
-                        onChange={(e) => setNewPanelPass(e.target.value)}
-                        className="w-full text-xs rounded-xl border border-gray-200 py-2.5 px-3 focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/20 focus:border-[#4F46E5] transition-all"
+                        placeholder={lang === "fa" ? "توکن کپی‌شده از تنظیمات پنل سنایی..." : "Token copied from 3x-ui settings..."}
+                        value={newPanelApiToken}
+                        onChange={(e) => setNewPanelApiToken(e.target.value)}
+                        className="w-full text-xs rounded-xl border border-gray-200 py-2.5 px-3 focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/20 focus:border-[#4F46E5] transition-all font-mono"
+                        required={authMethod === "token"}
                       />
+                      <p className="text-[9px] text-indigo-500 mt-1 font-medium leading-relaxed">
+                        {lang === "fa" 
+                          ? "💡 نکته: در نسخه‌های جدید سنایی (v2.3.4+)، می‌توانید از بخش تنظیمات پنل یک API Token بسازید تا بدون نیاز به یوزرنیم/پسورد و کوکی، با امنیت بالا به پنل متصل شوید." 
+                          : "💡 Tip: In modern MHSanaei versions, generate an API Token in panel settings to connect securely without a password."}
+                      </p>
                     </div>
-                  </div>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-500 mb-1.5">
+                          {lang === "fa" ? "نام کاربری پنل" : "Username"}
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="admin"
+                          value={newPanelUser}
+                          onChange={(e) => setNewPanelUser(e.target.value)}
+                          className="w-full text-xs rounded-xl border border-gray-200 py-2.5 px-3 focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/20 focus:border-[#4F46E5] transition-all"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-gray-500 mb-1.5">
+                          {lang === "fa" ? "رمز عبور پنل" : "Password"}
+                        </label>
+                        <input
+                          type="password"
+                          placeholder="••••••••"
+                          value={newPanelPass}
+                          onChange={(e) => setNewPanelPass(e.target.value)}
+                          className="w-full text-xs rounded-xl border border-gray-200 py-2.5 px-3 focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/20 focus:border-[#4F46E5] transition-all"
+                        />
+                      </div>
+                    </div>
+                  )}
 
                   {/* Connection Test Output */}
                   {testResult && (

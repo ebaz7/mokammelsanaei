@@ -38,6 +38,7 @@ interface Panel {
   workingLoginUrl?: string;
   workingInboundsUrl?: string;
   workingContentType?: "form" | "json";
+  apiToken?: string;
 }
 
 interface SmartSubscription {
@@ -222,6 +223,157 @@ function buildFarsiSummary(diagnostics: DiagnosticItem[]): string {
   return summary;
 }
 
+async function tryTokenOnCandidates(url: string, webBasePath: string, apiToken: string): Promise<{ inboundsUrl: string }> {
+  let cleanUrl = url.replace(/\/$/, "");
+  cleanUrl = cleanUrl.replace(/\/login$/, "");
+  cleanUrl = cleanUrl.replace(/\/panel$/, "");
+
+  const cleanBasePath = (webBasePath || "").trim().replace(/^\//, "").replace(/\/$/, "");
+
+  const candidateInboundUrls: string[] = [];
+
+  const addCandidate = (hostUrl: string, path: string) => {
+    const cleanHost = hostUrl.replace(/\/$/, "");
+    const cleanPath = path.trim() ? "/" + path.trim().replace(/^\//, "").replace(/\/$/, "") : "";
+    const inbounds = `${cleanHost}${cleanPath}/panel/api/inbounds/list`;
+    if (!candidateInboundUrls.includes(inbounds)) {
+      candidateInboundUrls.push(inbounds);
+    }
+  };
+
+  let protocol = "https:";
+  let hostname = "";
+  let port = "";
+  let urlPath = "";
+  try {
+    const parsed = new URL(cleanUrl);
+    protocol = parsed.protocol;
+    hostname = parsed.hostname;
+    port = parsed.port;
+    urlPath = parsed.pathname.replace(/\/$/, "");
+  } catch (e) {
+    const match = cleanUrl.match(/^(https?:\/\/)?([^:/]+)(:([0-9]+))?(\/.*)?$/);
+    if (match) {
+      protocol = match[1] || "https:";
+      hostname = match[2];
+      port = match[4] || "";
+      urlPath = match[5] || "";
+    }
+  }
+
+  addCandidate(cleanUrl, cleanBasePath);
+  addCandidate(cleanUrl, "");
+
+  const otherProtocol = protocol === "https:" ? "http:" : "https:";
+  const swappedUrl = `${otherProtocol}//${hostname}${port ? ":" + port : ""}${urlPath}`;
+  addCandidate(swappedUrl, cleanBasePath);
+  addCandidate(swappedUrl, "");
+
+  if (urlPath && /^\/[0-9]+$/.test(urlPath)) {
+    const pathPort = urlPath.substring(1);
+    addCandidate(`${protocol}//${hostname}:${pathPort}`, cleanBasePath);
+    addCandidate(`${protocol}//${hostname}:${pathPort}`, "");
+    addCandidate(`${otherProtocol}//${hostname}:${pathPort}`, cleanBasePath);
+    addCandidate(`${otherProtocol}//${hostname}:${pathPort}`, "");
+  }
+
+  if (port === "8080") {
+    addCandidate(`${protocol}//${hostname}:8090`, cleanBasePath);
+    addCandidate(`${protocol}//${hostname}:8090`, "");
+    addCandidate(`${otherProtocol}//${hostname}:8090`, cleanBasePath);
+    addCandidate(`${otherProtocol}//${hostname}:8090`, "");
+  }
+
+  addCandidate(`${protocol}//${hostname}:2053`, cleanBasePath);
+  addCandidate(`${protocol}//${hostname}:2053`, "");
+  addCandidate(`${otherProtocol}//${hostname}:2053`, cleanBasePath);
+  addCandidate(`${otherProtocol}//${hostname}:2053`, "");
+
+  addCandidate(`${protocol}//${hostname}`, cleanBasePath);
+  addCandidate(`${protocol}//${hostname}`, "");
+  addCandidate(`${otherProtocol}//${hostname}`, cleanBasePath);
+  addCandidate(`${otherProtocol}//${hostname}`, "");
+
+  if (hostname !== "127.0.0.1" && hostname !== "localhost") {
+    if (port) {
+      addCandidate(`http://127.0.0.1:${port}`, cleanBasePath);
+      addCandidate(`http://127.0.0.1:${port}`, "");
+    }
+    const defaultLocalPorts = ["2053", "8090", "54321", "2083", "2087"];
+    defaultLocalPorts.forEach(p => {
+      addCandidate(`http://127.0.0.1:${p}`, cleanBasePath);
+      addCandidate(`http://127.0.0.1:${p}`, "");
+    });
+  }
+
+  const diagnostics: DiagnosticItem[] = [];
+  let workingInboundsUrl = "";
+
+  const tests = candidateInboundUrls.map(async (inboundUrl) => {
+    const diag: DiagnosticItem = {
+      url: inboundUrl,
+      method: "json",
+      success: false,
+      error: "",
+    };
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+    try {
+      const res = await fetch(inboundUrl, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${apiToken}`,
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept": "application/json, text/plain, */*",
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      diag.status = res.status;
+
+      if (res.status === 200) {
+        const text = await res.text();
+        let json: any = null;
+        try {
+          json = JSON.parse(text);
+        } catch (e) {}
+
+        if (json && typeof json === "object" && (json.success === true || Array.isArray(json.obj))) {
+          diag.success = true;
+          workingInboundsUrl = inboundUrl;
+        } else {
+          diag.error = json?.msg || "توکن معتبر است اما پاسخ پنل نامشخص است";
+        }
+      } else if (res.status === 401) {
+        diag.error = "توکن ای‌پی‌آی (API Token) نامعتبر یا منقضی شده است (401)";
+      } else {
+        diag.error = `پاسخ نامشخص از سرور (Status ${res.status})`;
+      }
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      if (err.name === "AbortError") {
+        diag.error = "زمان اتصال پایان یافت (Timeout)";
+      } else if (err.code === "ECONNREFUSED" || err.message?.includes("refused")) {
+        diag.error = "اتصال رد شد (Connection Refused)";
+      } else {
+        diag.error = err.message || "خطای شبکه";
+      }
+    }
+    diagnostics.push(diag);
+  });
+
+  await Promise.allSettled(tests);
+
+  if (workingInboundsUrl) {
+    return { inboundsUrl: workingInboundsUrl };
+  }
+
+  const farsiSummary = buildFarsiSummary(diagnostics);
+  throw new DiagnosticError(farsiSummary, diagnostics);
+}
+
 async function tryLoginOnCandidates(url: string, webBasePath: string, username: string, password: string): Promise<LoginTestResult> {
   let cleanUrl = url.replace(/\/$/, "");
   // Strip trailing "/login" or "/panel" if written in the URL
@@ -317,6 +469,19 @@ async function tryLoginOnCandidates(url: string, webBasePath: string, username: 
   const rootUrl2 = `${otherProtocol}//${hostname}`;
   addCandidate(rootUrl2, cleanBasePath);
   addCandidate(rootUrl2, "");
+
+  // 8. Automated Local loopback fallbacks (very helpful when companion and 3x-ui run on the same VPS to bypass NAT Hairpinning/Firewalls)
+  if (hostname !== "127.0.0.1" && hostname !== "localhost") {
+    if (port) {
+      addCandidate(`http://127.0.0.1:${port}`, cleanBasePath);
+      addCandidate(`http://127.0.0.1:${port}`, "");
+    }
+    const defaultLocalPorts = ["2053", "8090", "54321", "2083", "2087"];
+    defaultLocalPorts.forEach(p => {
+      addCandidate(`http://127.0.0.1:${p}`, cleanBasePath);
+      addCandidate(`http://127.0.0.1:${p}`, "");
+    });
+  }
 
   console.log(`[3x-ui Auth] Testing ${candidateUrls.length} different URL/Port variations in parallel with deep diagnostics...`);
 
@@ -427,65 +592,81 @@ async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: str
   }
 
   try {
-    let loginUrl = panel.workingLoginUrl;
     let inboundsUrl = panel.workingInboundsUrl;
-    let contentType = panel.workingContentType || "form";
-    let sessionCookie = "";
+    let headers: Record<string, string> = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    };
 
-    // If we have working URLs, try to login using them first
-    if (loginUrl && inboundsUrl) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
-        
-        const loginRes = await fetch(loginUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": contentType === "json" ? "application/json" : "application/x-www-form-urlencoded",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-          },
-          body: contentType === "json" 
-            ? JSON.stringify({ username: panel.username, password: panel.password })
-            : new URLSearchParams({ username: panel.username, password: panel.password }),
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-
-        if (loginRes.ok) {
-          const setCookie = loginRes.headers.get("set-cookie");
-          if (setCookie) {
-            sessionCookie = setCookie.split(";")[0];
-          }
-        }
-      } catch (err) {
-        console.warn(`[3x-ui Sync] Quick login failed for ${panel.name}, will try auto-discovery:`, err);
+    if (panel.apiToken) {
+      // 1. API Token Mode
+      headers["Authorization"] = `Bearer ${panel.apiToken}`;
+      if (!inboundsUrl) {
+        console.log(`[3x-ui Sync] Running URL auto-discovery with API Token for panel ${panel.name}...`);
+        const result = await tryTokenOnCandidates(panel.url, panel.webBasePath || "", panel.apiToken);
+        inboundsUrl = result.inboundsUrl;
+        panel.workingInboundsUrl = inboundsUrl;
+        saveDb();
       }
-    }
+    } else {
+      // 2. Cookie Mode
+      let loginUrl = panel.workingLoginUrl;
+      let contentType = panel.workingContentType || "form";
+      let sessionCookie = "";
 
-    // If quick login failed or we didn't have cached URLs, run discovery
-    if (!sessionCookie) {
-      console.log(`[3x-ui Sync] Running URL auto-discovery for panel ${panel.name}...`);
-      const result = await tryLoginOnCandidates(panel.url, panel.webBasePath || "", panel.username, panel.password);
-      loginUrl = result.loginUrl;
-      inboundsUrl = result.inboundsUrl;
-      contentType = result.contentType;
-      sessionCookie = result.cookie;
+      // If we have working URLs, try to login using them first
+      if (loginUrl && inboundsUrl) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 5000);
+          
+          const loginRes = await fetch(loginUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": contentType === "json" ? "application/json" : "application/x-www-form-urlencoded",
+              ...headers,
+              "Accept": "application/json, text/plain, */*",
+            },
+            body: contentType === "json" 
+              ? JSON.stringify({ username: panel.username, password: panel.password })
+              : new URLSearchParams({ username: panel.username, password: panel.password }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
 
-      // Update and cache the successful URLs in database
-      panel.workingLoginUrl = loginUrl;
-      panel.workingInboundsUrl = inboundsUrl;
-      panel.workingContentType = contentType;
-      saveDb();
+          if (loginRes.ok) {
+            const setCookie = loginRes.headers.get("set-cookie");
+            if (setCookie) {
+              sessionCookie = setCookie.split(";")[0];
+            }
+          }
+        } catch (err) {
+          console.warn(`[3x-ui Sync] Quick login failed for ${panel.name}, will try auto-discovery:`, err);
+        }
+      }
+
+      // If quick login failed or we didn't have cached URLs, run discovery
+      if (!sessionCookie) {
+        console.log(`[3x-ui Sync] Running URL auto-discovery for panel ${panel.name}...`);
+        const result = await tryLoginOnCandidates(panel.url, panel.webBasePath || "", panel.username, panel.password);
+        loginUrl = result.loginUrl;
+        inboundsUrl = result.inboundsUrl;
+        contentType = result.contentType;
+        sessionCookie = result.cookie;
+
+        // Update and cache the successful URLs in database
+        panel.workingLoginUrl = loginUrl;
+        panel.workingInboundsUrl = inboundsUrl;
+        panel.workingContentType = contentType;
+        saveDb();
+      }
+
+      headers["Cookie"] = sessionCookie;
     }
 
     // Request active inbounds list
     const inboundsRes = await fetch(inboundsUrl, {
       method: "GET",
-      headers: {
-        "Cookie": sessionCookie,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      },
+      headers,
     });
 
     if (!inboundsRes.ok) {
@@ -574,7 +755,7 @@ app.get("/api/panels", (req, res) => {
 });
 
 app.post("/api/panels", async (req, res) => {
-  const { name, url, username, password, isMock, webBasePath } = req.body;
+  const { name, url, username, password, isMock, webBasePath, apiToken } = req.body;
   if (!name || !url) {
     res.status(400).json({ error: "Name and URL are required" });
     return;
@@ -584,6 +765,7 @@ app.post("/api/panels", async (req, res) => {
   const cleanWebBasePath = webBasePath || "";
   const cleanUser = username || "admin";
   const cleanPass = password || "";
+  const cleanApiToken = apiToken || "";
 
   let workingLoginUrl = "";
   let workingInboundsUrl = "";
@@ -591,10 +773,15 @@ app.post("/api/panels", async (req, res) => {
 
   if (!isMock && !cleanUrl.includes("mock") && !cleanUrl.includes("sanaei.xyz")) {
     try {
-      const result = await tryLoginOnCandidates(cleanUrl, cleanWebBasePath, cleanUser, cleanPass);
-      workingLoginUrl = result.loginUrl;
-      workingInboundsUrl = result.inboundsUrl;
-      workingContentType = result.contentType;
+      if (cleanApiToken) {
+        const result = await tryTokenOnCandidates(cleanUrl, cleanWebBasePath, cleanApiToken);
+        workingInboundsUrl = result.inboundsUrl;
+      } else {
+        const result = await tryLoginOnCandidates(cleanUrl, cleanWebBasePath, cleanUser, cleanPass);
+        workingLoginUrl = result.loginUrl;
+        workingInboundsUrl = result.inboundsUrl;
+        workingContentType = result.contentType;
+      }
     } catch (e) {
       console.warn("[Register Panel] Connection check failed, defaulting to basic URLs:", e);
       const defaults = getPanelApiUrls(cleanUrl, cleanWebBasePath);
@@ -607,8 +794,9 @@ app.post("/api/panels", async (req, res) => {
     id: "panel-" + Math.random().toString(36).substr(2, 9),
     name,
     url: cleanUrl,
-    username: cleanUser,
-    password: cleanPass,
+    username: cleanApiToken ? "Token-Based" : cleanUser,
+    password: cleanApiToken ? "" : cleanPass,
+    apiToken: cleanApiToken,
     isActive: true,
     isMock: !!isMock || cleanUrl.includes("mock") || cleanUrl.includes("sanaei.xyz"),
     webBasePath: cleanWebBasePath,
@@ -654,64 +842,80 @@ app.post("/api/panels/:id/sync", async (req, res) => {
   } else {
     // Real 3x-ui API Call
     try {
-      let loginUrl = panel.workingLoginUrl;
       let inboundsUrl = panel.workingInboundsUrl;
-      let contentType = panel.workingContentType || "form";
-      let sessionCookie = "";
+      let headers: Record<string, string> = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      };
 
-      // Try quick authenticated login with working URLs first
-      if (loginUrl && inboundsUrl) {
-        try {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 5000);
-          
-          const loginRes = await fetch(loginUrl, {
-            method: "POST",
-            headers: {
-              "Content-Type": contentType === "json" ? "application/json" : "application/x-www-form-urlencoded",
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-              "Accept": "application/json, text/plain, */*",
-            },
-            body: contentType === "json" 
-              ? JSON.stringify({ username: panel.username, password: panel.password })
-              : new URLSearchParams({ username: panel.username, password: panel.password }),
-            signal: controller.signal,
-          });
-          clearTimeout(timeoutId);
-
-          if (loginRes.ok) {
-            const setCookie = loginRes.headers.get("set-cookie");
-            if (setCookie) {
-              sessionCookie = setCookie.split(";")[0];
-            }
-          }
-        } catch (e) {
-          console.warn("[Sync API] Quick auth failed, starting auto-discovery:", e);
+      if (panel.apiToken) {
+        // API Token Mode
+        headers["Authorization"] = `Bearer ${panel.apiToken}`;
+        if (!inboundsUrl) {
+          console.log(`[Sync API] Running URL auto-discovery with API Token for panel ${panel.name}...`);
+          const result = await tryTokenOnCandidates(panel.url, panel.webBasePath || "", panel.apiToken);
+          inboundsUrl = result.inboundsUrl;
+          panel.workingInboundsUrl = inboundsUrl;
+          saveDb();
         }
-      }
+      } else {
+        // Cookie Mode
+        let loginUrl = panel.workingLoginUrl;
+        let contentType = panel.workingContentType || "form";
+        let sessionCookie = "";
 
-      // Run auto-discovery if cached fields are missing or failed
-      if (!sessionCookie) {
-        console.log(`[Sync API] Running URL auto-discovery for panel ${panel.name}...`);
-        const result = await tryLoginOnCandidates(panel.url, panel.webBasePath || "", panel.username, panel.password);
-        loginUrl = result.loginUrl;
-        inboundsUrl = result.inboundsUrl;
-        contentType = result.contentType;
-        sessionCookie = result.cookie;
+        // Try quick authenticated login with working URLs first
+        if (loginUrl && inboundsUrl) {
+          try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            
+            const loginRes = await fetch(loginUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": contentType === "json" ? "application/json" : "application/x-www-form-urlencoded",
+                ...headers,
+                "Accept": "application/json, text/plain, */*",
+              },
+              body: contentType === "json" 
+                ? JSON.stringify({ username: panel.username, password: panel.password })
+                : new URLSearchParams({ username: panel.username, password: panel.password }),
+              signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
 
-        // Cache the successful results in the DB
-        panel.workingLoginUrl = loginUrl;
-        panel.workingInboundsUrl = inboundsUrl;
-        panel.workingContentType = contentType;
-        saveDb();
+            if (loginRes.ok) {
+              const setCookie = loginRes.headers.get("set-cookie");
+              if (setCookie) {
+                sessionCookie = setCookie.split(";")[0];
+              }
+            }
+          } catch (e) {
+            console.warn("[Sync API] Quick auth failed, starting auto-discovery:", e);
+          }
+        }
+
+        // Run auto-discovery if cached fields are missing or failed
+        if (!sessionCookie) {
+          console.log(`[Sync API] Running URL auto-discovery for panel ${panel.name}...`);
+          const result = await tryLoginOnCandidates(panel.url, panel.webBasePath || "", panel.username, panel.password);
+          loginUrl = result.loginUrl;
+          inboundsUrl = result.inboundsUrl;
+          contentType = result.contentType;
+          sessionCookie = result.cookie;
+
+          // Cache the successful results in the DB
+          panel.workingLoginUrl = loginUrl;
+          panel.workingInboundsUrl = inboundsUrl;
+          panel.workingContentType = contentType;
+          saveDb();
+        }
+
+        headers["Cookie"] = sessionCookie;
       }
 
       const inboundsRes = await fetch(inboundsUrl, {
         method: "GET",
-        headers: {
-          "Cookie": sessionCookie,
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        },
+        headers,
       });
 
       if (!inboundsRes.ok) {
@@ -816,7 +1020,17 @@ app.post("/api/panels/:id/sync", async (req, res) => {
 
 // 2. Test Connection
 app.post("/api/panels/test", async (req, res) => {
-  const { url, username, password, isMock, webBasePath } = req.body;
+  const { url, username, password, isMock, webBasePath, apiToken } = req.body;
+  
+  // Log the request details for debugging (excluding the actual password for security, just showing length)
+  try {
+    const logFilePath = path.join(DB_DIR, "test_requests.log");
+    const logEntry = `[${new Date().toISOString()}] URL: "${url}", BasePath: "${webBasePath}", User: "${username}", HasToken: ${!!apiToken}\n`;
+    fs.appendFileSync(logFilePath, logEntry);
+  } catch (logErr) {
+    console.error("Failed to write to request log file:", logErr);
+  }
+
   if (isMock || url?.includes("sanaei.xyz") || url?.includes("mock")) {
     // Simulate connection lag
     await new Promise((resolve) => setTimeout(resolve, 800));
@@ -829,17 +1043,28 @@ app.post("/api/panels/test", async (req, res) => {
   }
 
   try {
-    // Attempt multi-candidate smart login
-    const result = await tryLoginOnCandidates(url, webBasePath || "", username || "admin", password || "");
-    
-    res.json({
-      success: true,
-      version: "v2.3.8 (Detected)",
-      message: `اتصال هوشمند با موفقیت برقرار شد!\nآدرس فعال شناسایی شده: ${result.loginUrl}\nنوع وب‌سرویس: ${result.contentType === "json" ? "JSON API" : "Form URL-Encoded"}`,
-      workingLoginUrl: result.loginUrl,
-      workingInboundsUrl: result.inboundsUrl,
-      workingContentType: result.contentType,
-    });
+    if (apiToken) {
+      // Attempt token discovery
+      const result = await tryTokenOnCandidates(url, webBasePath || "", apiToken);
+      res.json({
+        success: true,
+        version: "Bearer Token Auth",
+        message: `اتصال امن API از طریق توکن با موفقیت برقرار شد!\nآدرس فعال شناسایی شده: ${result.inboundsUrl}`,
+        workingInboundsUrl: result.inboundsUrl,
+      });
+    } else {
+      // Attempt multi-candidate smart login
+      const result = await tryLoginOnCandidates(url, webBasePath || "", username || "admin", password || "");
+      
+      res.json({
+        success: true,
+        version: "v2.3.8 (Detected)",
+        message: `اتصال هوشمند با موفقیت برقرار شد!\nآدرس فعال شناسایی شده: ${result.loginUrl}\nنوع وب‌سرویس: ${result.contentType === "json" ? "JSON API" : "Form URL-Encoded"}`,
+        workingLoginUrl: result.loginUrl,
+        workingInboundsUrl: result.inboundsUrl,
+        workingContentType: result.contentType,
+      });
+    }
   } catch (err: any) {
     console.error("Test connection failed:", err);
     res.json({
