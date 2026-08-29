@@ -189,36 +189,55 @@ function initDb(): DB {
     };
   }
 
+  // Detect server on-disk keys if running on Linux
+  let onDiskServerPub = "";
+  let onDiskServerPriv = "";
+  try {
+    if (fs.existsSync("/etc/wireguard/server.pub")) {
+      const p = fs.readFileSync("/etc/wireguard/server.pub", "utf8").trim();
+      if (isValidBase64WgKey(p)) onDiskServerPub = p;
+    }
+    if (fs.existsSync("/etc/wireguard/server.key")) {
+      const k = fs.readFileSync("/etc/wireguard/server.key", "utf8").trim();
+      if (isValidBase64WgKey(k)) onDiskServerPriv = k;
+    }
+  } catch (e) {}
+
   if (!dbDataObj.settings) {
     const wgKeys = generateWireGuardKeys();
     dbDataObj.settings = {
       l2tpServerIp: "",
       l2tpPsk: "SanaeiL2TPSecureKey",
-      wgServerPrivateKey: wgKeys.privateKey,
-      wgServerPublicKey: wgKeys.publicKey,
+      wgServerPrivateKey: onDiskServerPriv || wgKeys.privateKey,
+      wgServerPublicKey: onDiskServerPub || wgKeys.publicKey,
       wgServerPort: 51820,
       wgServerDns: "1.1.1.1, 8.8.8.8",
     };
   } else {
+    if (onDiskServerPub && (!dbDataObj.settings.wgServerPublicKey || dbDataObj.settings.wgServerPublicKey !== onDiskServerPub)) {
+      dbDataObj.settings.wgServerPublicKey = onDiskServerPub;
+    }
+    if (onDiskServerPriv && (!dbDataObj.settings.wgServerPrivateKey || dbDataObj.settings.wgServerPrivateKey !== onDiskServerPriv)) {
+      dbDataObj.settings.wgServerPrivateKey = onDiskServerPriv;
+    }
     // Validate existing settings keys
     if (!isValidBase64WgKey(dbDataObj.settings.wgServerPrivateKey) || !isValidBase64WgKey(dbDataObj.settings.wgServerPublicKey)) {
       const newKeys = generateWireGuardKeys();
-      dbDataObj.settings.wgServerPrivateKey = newKeys.privateKey;
-      dbDataObj.settings.wgServerPublicKey = newKeys.publicKey;
+      dbDataObj.settings.wgServerPrivateKey = onDiskServerPriv || newKeys.privateKey;
+      dbDataObj.settings.wgServerPublicKey = onDiskServerPub || newKeys.publicKey;
     }
   }
 
   // Validate existing subscriptions keys
   if (Array.isArray(dbDataObj.subscriptions)) {
-    dbDataObj.subscriptions.forEach((sub) => {
+    dbDataObj.subscriptions.forEach((sub, idx) => {
       if (!isValidBase64WgKey(sub.wireguardPrivateKey) || !isValidBase64WgKey(sub.wireguardPublicKey)) {
         const generated = generateWireGuardKeys();
         sub.wireguardPrivateKey = generated.privateKey;
         sub.wireguardPublicKey = generated.publicKey;
       }
-      if (!sub.wireguardAddress || !sub.wireguardAddress.includes("/")) {
-        sub.wireguardAddress = "10.8.0.2/24";
-      }
+      const clientIp = `10.8.0.${100 + idx}`;
+      sub.wireguardAddress = `${clientIp}/24`;
     });
   }
 

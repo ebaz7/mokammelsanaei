@@ -349,19 +349,25 @@ setup_system_vpn_services() {
     wireguard wireguard-tools strongswan strongswan-pki libcharon-extra-plugins \
     xl2tpd ppp openvpn iptables iptables-persistent net-tools ufw
 
-  echo -e "${BLUE}[2/5] Enabling IPv4 Kernel Packet Forwarding...${NC}"
+  echo -e "${BLUE}[2/5] Enabling IPv4 Kernel Packet Forwarding & MTU tweaks...${NC}"
   sysctl -w net.ipv4.ip_forward=1
+  sysctl -w net.ipv4.conf.all.accept_redirects=0
+  sysctl -w net.ipv4.conf.all.send_redirects=0
   if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
     echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+    echo "net.ipv4.conf.all.accept_redirects=0" >> /etc/sysctl.conf
+    echo "net.ipv4.conf.all.send_redirects=0" >> /etc/sysctl.conf
   fi
   sysctl -p /etc/sysctl.conf 2>/dev/null
 
-  # Detect Main Network Interface
+  # Detect Main Network Interface and Public IP
   MAIN_IFACE=$(ip route show default | awk '{print $5}' | head -n1)
   if [ -z "$MAIN_IFACE" ]; then
     MAIN_IFACE="eth0"
   fi
+  PUBLIC_IP=$(curl -s4 https://api.ipify.org || curl -s4 https://ifconfig.me || hostname -I | awk '{print $1}')
   echo -e "Detected Main Interface: ${GREEN}${MAIN_IFACE}${NC}"
+  echo -e "Detected Public Server IP: ${GREEN}${PUBLIC_IP}${NC}"
 
   echo -e "${BLUE}[3/5] Configuring WireGuard Server (/etc/wireguard/wg0.conf)...${NC}"
   mkdir -p /etc/wireguard
@@ -378,8 +384,8 @@ setup_system_vpn_services() {
 PrivateKey = ${SERVER_PRIV_KEY}
 Address = 10.8.0.1/24
 ListenPort = 51820
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${MAIN_IFACE} -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ${MAIN_IFACE} -j MASQUERADE
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -A FORWARD -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o ${MAIN_IFACE} -j MASQUERADE; iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -D FORWARD -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o ${MAIN_IFACE} -j MASQUERADE; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 
 EOF
 
@@ -454,10 +460,20 @@ EOF
   touch /etc/ppp/chap-secrets
   chmod 600 /etc/ppp/chap-secrets
 
-  echo -e "${BLUE}[5/5] Configuring IPTables NAT and Starting Services...${NC}"
+  echo -e "${BLUE}[5/5] Configuring IPTables NAT, MSS Clamping and Starting Services...${NC}"
+  # Forwarding rules
+  iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+  iptables -A FORWARD -s 10.8.0.0/24 -j ACCEPT
+  iptables -A FORWARD -s 10.9.0.0/24 -j ACCEPT
+  iptables -A FORWARD -s 10.10.0.0/24 -j ACCEPT
+
+  # NAT Masquerading
   iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o ${MAIN_IFACE} -j MASQUERADE 2>/dev/null
   iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o ${MAIN_IFACE} -j MASQUERADE 2>/dev/null
   iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o ${MAIN_IFACE} -j MASQUERADE 2>/dev/null
+
+  # TCP MSS Clamping to prevent packet fragmentation issues on mobile/telecom networks
+  iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
   
   # Save iptables
   netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables.rules 2>/dev/null
@@ -467,6 +483,30 @@ EOF
   systemctl restart strongswan-starter 2>/dev/null || systemctl restart strongswan 2>/dev/null
   systemctl enable xl2tpd 2>/dev/null
   systemctl restart xl2tpd 2>/dev/null
+
+  # Sync settings to panel db if present
+  if [ -f "/opt/sanaei-smart-sub/data/database.json" ]; then
+    node -e "
+      const fs = require('fs');
+      try {
+        const p = '/opt/sanaei-smart-sub/data/database.json';
+        const d = JSON.parse(fs.readFileSync(p, 'utf8'));
+        if (d.settings) {
+          d.settings.wgServerPublicKey = '${SERVER_PUB_KEY}';
+          d.settings.wgServerPrivateKey = '${SERVER_PRIV_KEY}';
+          if ('${PUBLIC_IP}') d.settings.l2tpServerIp = '${PUBLIC_IP}';
+        }
+        if (Array.isArray(d.inbounds)) {
+          d.inbounds.forEach(i => {
+            if ('${PUBLIC_IP}') i.serverIp = '${PUBLIC_IP}';
+            i.wgServerPublicKey = '${SERVER_PUB_KEY}';
+          });
+        }
+        fs.writeFileSync(p, JSON.stringify(d, null, 2));
+      } catch(e) {}
+    " 2>/dev/null
+    systemctl restart sanaei-smart-sub 2>/dev/null
+  fi
 
   echo ""
   echo -e "${GREEN}================================================================${NC}"
