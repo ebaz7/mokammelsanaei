@@ -489,16 +489,25 @@ app.post("/api/panels/test", async (req, res) => {
         message: "Successfully authenticated with MHSanaei 3x-ui panel",
       });
     } else {
-      res.status(401).json({
+      let advice = "";
+      if (loginRes.status === 404) {
+        advice = "آدرس یا پیشوند مسیر اشتباه است. لطفاً آدرس پنل و پیشوند مسیر را بررسی کنید. توجه: در کادر آدرس شما عبارت '/8090' وجود دارد؛ اگر پورت پنل شما 8090 است، باید آدرس را به شکل https://jeimi.namzani.shop:8090 وارد کنید و عبارت اضافی را از ته آدرس بردارید.";
+      } else if (loginRes.status === 401) {
+        advice = "نام کاربری یا رمز عبور پنل سنایی اشتباه است. لطفاً آن را مجدد بررسی کنید.";
+      } else {
+        advice = "پاسخ نامشخص از سرور دریافت شد. پورت یا تنظیمات وب بیس پث را مجدداً چک کنید.";
+      }
+      res.status(400).json({
         success: false,
-        message: `Authentication failed (Status code: ${loginRes.status})`,
+        message: `Authentication failed (Status code: ${loginRes.status})\nURL: ${loginUrl}\nراهنما: ${advice}`,
       });
     }
   } catch (err: any) {
     console.error("Test connection failed:", err);
+    const { loginUrl } = getPanelApiUrls(url, webBasePath);
     res.json({
       success: false,
-      message: `Failed to connect: ${err.message || "Connection timed out"}. Used fallback mock mode.`,
+      message: `اتصال به سرور برقرار نشد (Fetch Error)\nآدرس تست شده: ${loginUrl}\nخطا: ${err.message || "Connection timed out"}\nراهنما: مطمئن شوید پروتکل (http یا https) و پورت پنل درست است و فایروال سرور پورت را نبسته باشد.`,
       isFallback: true,
     });
   }
