@@ -229,7 +229,7 @@ export default function App() {
     const safeIdx = inbIdx >= 0 ? inbIdx : 0;
     const isBridge = bridgeRoutingEnabled && !forceDirect;
     const priv = ensureValidWgKey(sub.wireguardPrivateKey, `sub_priv_${sub.id || sub.username}`);
-    const subIdx = subscriptions.findIndex(s => s.id === sub.id);
+    const subIdx = subs.findIndex(s => s.id === sub.id);
     const clientIp = 100 + (subIdx >= 0 ? subIdx : 0);
     const addr = isBridge ? `10.8.${safeIdx}.${clientIp}/24` : (sub.wireguardAddress && sub.wireguardAddress.includes("/") ? sub.wireguardAddress : "10.8.0.2/24");
     const dns = sub.wireguardDns || wgServerDnsState || "1.1.1.1, 8.8.8.8";
@@ -1529,7 +1529,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                       </p>
                     </div>
                     <span className="text-[10px] text-gray-400 font-mono">
-                      {new Date(selectedSub.createdAt).toLocaleDateString(lang === "fa" ? "fa-IR" : "en-US")}
+                      {selectedSub.createdAt ? (() => { try { return new Date(selectedSub.createdAt).toLocaleDateString(lang === "fa" ? "fa-IR" : "en-US"); } catch { return ""; } })() : ""}
                     </span>
                   </div>
 
@@ -2167,7 +2167,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                                 <button onClick={() => {
                                   const inb = getActiveInbound();
                                   const host = resolveEffectiveHost(inb?.serverIp, selectedSub.l2tpServerIp);
-                                  const port = inb?.wgPort || inb?.port || wgServerPortState || 51820;
+                                  const port = bridgeRoutingEnabled ? (inb?.bridgeWgPort || (51820 + (inbounds.findIndex(i => i.id === inb?.id) >= 0 ? inbounds.findIndex(i => i.id === inb?.id) : 0))) : (inb?.wgPort || inb?.port || wgServerPortState || 51820);
                                   triggerCopy(`${host}:${port}`, "wg_end");
                                 }} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                   {copiedId === "wg_end" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
@@ -2177,7 +2177,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                                 {(() => {
                                   const inb = getActiveInbound();
                                   const host = resolveEffectiveHost(inb?.serverIp, selectedSub.l2tpServerIp);
-                                  const port = inb?.wgPort || inb?.port || wgServerPortState || 51820;
+                                  const port = bridgeRoutingEnabled ? (inb?.bridgeWgPort || (51820 + (inbounds.findIndex(i => i.id === inb?.id) >= 0 ? inbounds.findIndex(i => i.id === inb?.id) : 0))) : (inb?.wgPort || inb?.port || wgServerPortState || 51820);
                                   return `${host}:${port}`;
                                 })()}
                               </code>

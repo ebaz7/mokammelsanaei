@@ -9,7 +9,16 @@
     <meta property="og:description" content="A management tool and smart subscription proxy for MHSanaei 3x-ui, generating legacy L2TP/IPSec, modern WireGuard configs, and auto-updating self-switching Clash/Sing-box profiles." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
-  </head>
+  
+    <script>
+      window.addEventListener('error', function(e) {
+        document.body.innerHTML = '<div style="padding: 20px; background: red; color: white; font-family: monospace; z-index: 999999; position: fixed; inset: 0; overflow: auto;"><h2>React Crash!</h2><pre>' + e.message + '\n' + e.filename + ':' + e.lineno + ':' + e.colno + '\n' + (e.error && e.error.stack ? e.error.stack : '') + '</pre></div>';
+      });
+      window.addEventListener('unhandledrejection', function(e) {
+        document.body.innerHTML = '<div style="padding: 20px; background: red; color: white; font-family: monospace; z-index: 999999; position: fixed; inset: 0; overflow: auto;"><h2>Unhandled Promise Rejection!</h2><pre>' + e.reason + '</pre></div>';
+      });
+    </script>
+</head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
