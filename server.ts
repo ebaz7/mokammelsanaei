@@ -85,6 +85,12 @@ interface InboundNode {
   l2tpPsk?: string;
   isDefault?: boolean;
   notes?: string;
+  network?: string;
+  security?: string;
+  path?: string;
+  sni?: string;
+  flow?: string;
+  method?: string;
 }
 
 interface DB {
@@ -1604,6 +1610,21 @@ app.post("/api/panels/:id/sync", async (req, res) => {
           // Deep extraction of host/IP, cluster node, domain, SNI, and country
           const extracted = extractInboundHostAndIp(inbound, panel, nodesMap);
 
+          const streamSettings = typeof inbound.streamSettings === "string" 
+            ? (() => { try { return JSON.parse(inbound.streamSettings); } catch (e) { return {}; } })()
+            : (inbound.streamSettings || {});
+          
+          const settings = typeof inbound.settings === "string" 
+            ? (() => { try { return JSON.parse(inbound.settings); } catch (e) { return {}; } })() 
+            : (inbound.settings || {});
+
+          const extractedSni = streamSettings?.tlsSettings?.serverName || streamSettings?.xtlsSettings?.serverName || streamSettings?.realitySettings?.serverNames?.[0] || extracted.hostOrIp;
+          const extractedSecurity = streamSettings?.security || "none";
+          const extractedPathStr = streamSettings?.wsSettings?.path || streamSettings?.grpcSettings?.serviceName || "";
+          const extractedNetType = streamSettings?.network || "tcp";
+          const extractedFlow = settings?.clients?.[0]?.flow || "";
+          const extractedMethod = settings?.method || "";
+
           const existingIdx = dbData.inbounds.findIndex(i => i.id === customId || (i.panelId === panel.id && i.port === inboundPort && i.protocol === inboundProtocol));
           const inboundNodeData: InboundNode = {
             id: customId,
@@ -1622,7 +1643,13 @@ app.post("/api/panels/:id/sync", async (req, res) => {
             openvpnProto: extracted.openvpnProto,
             l2tpPsk: dbData.settings?.l2tpPsk || "SanaeiL2TPSecureKey",
             isDefault: dbData.inbounds.length === 0,
-            notes: `${extracted.notes} (${inboundProtocol.toUpperCase()} Port ${inboundPort})`
+            notes: `${extracted.notes} (${inboundProtocol.toUpperCase()} Port ${inboundPort})`,
+            network: extractedNetType,
+            security: extractedSecurity,
+            path: extractedPathStr,
+            sni: extractedSni,
+            flow: extractedFlow,
+            method: extractedMethod
           };
 
           if (existingIdx !== -1) {
@@ -1632,11 +1659,11 @@ app.post("/api/panels/:id/sync", async (req, res) => {
           }
 
           // 2. Extract Clients
-          const settings = typeof inbound.settings === "string" 
+          const clientSettings = typeof inbound.settings === "string" 
             ? (() => { try { return JSON.parse(inbound.settings); } catch(e){ return {}; } })() 
             : (inbound.settings || {});
-          if (settings && Array.isArray(settings.clients)) {
-            for (const client of settings.clients) {
+          if (clientSettings && Array.isArray(clientSettings.clients)) {
+            for (const client of clientSettings.clients) {
               if (client.email) {
                 clientsToSync.push({
                   email: client.email,
@@ -1996,6 +2023,21 @@ app.post("/api/inbounds/sync-from-panels", async (req, res) => {
               // Deep extraction of host, node, SNI, and country
               const extracted = extractInboundHostAndIp(inbound, panel, nodesMap);
 
+              const streamSettings = typeof inbound.streamSettings === "string" 
+                ? (() => { try { return JSON.parse(inbound.streamSettings); } catch (e) { return {}; } })()
+                : (inbound.streamSettings || {});
+              
+              const settings = typeof inbound.settings === "string" 
+                ? (() => { try { return JSON.parse(inbound.settings); } catch (e) { return {}; } })() 
+                : (inbound.settings || {});
+
+              const extractedSni = streamSettings?.tlsSettings?.serverName || streamSettings?.xtlsSettings?.serverName || streamSettings?.realitySettings?.serverNames?.[0] || extracted.hostOrIp;
+              const extractedSecurity = streamSettings?.security || "none";
+              const extractedPathStr = streamSettings?.wsSettings?.path || streamSettings?.grpcSettings?.serviceName || "";
+              const extractedNetType = streamSettings?.network || "tcp";
+              const extractedFlow = settings?.clients?.[0]?.flow || "";
+              const extractedMethod = settings?.method || "";
+
               const existingIdx = dbData.inbounds.findIndex(i => i.id === customId || (i.panelId === panel.id && i.port === inboundPort && i.protocol === inboundProtocol));
               const inboundNodeData: InboundNode = {
                 id: customId,
@@ -2014,7 +2056,13 @@ app.post("/api/inbounds/sync-from-panels", async (req, res) => {
                 openvpnProto: extracted.openvpnProto,
                 l2tpPsk: dbData.settings?.l2tpPsk || "SanaeiL2TPSecureKey",
                 isDefault: dbData.inbounds.length === 0,
-                notes: `${extracted.notes} (${inboundProtocol.toUpperCase()} Port ${inboundPort})`
+                notes: `${extracted.notes} (${inboundProtocol.toUpperCase()} Port ${inboundPort})`,
+                network: extractedNetType,
+                security: extractedSecurity,
+                path: extractedPathStr,
+                sni: extractedSni,
+                flow: extractedFlow,
+                method: extractedMethod
               };
 
               if (existingIdx !== -1) {
@@ -2287,6 +2335,92 @@ app.get("/api/bridge/status", (req, res) => {
   });
 });
 
+// Helper to generate full Xray Outbound strictly connecting to a real Inbound Node with a specific User's UUID
+function generateXrayOutboundForInboundAndUser(inb: any, uuid: string, outTag: string): any {
+  const address = inb.serverIp || "127.0.0.1";
+  const port = inb.port || 443;
+  const protocol = inb.protocol || "vless";
+  
+  const network = inb.network || "tcp";
+  const security = inb.security || "none";
+  const path = inb.path || "";
+  const sni = inb.sni || address;
+  const flow = inb.flow || "";
+
+  if (protocol === "vless") {
+    return {
+      tag: outTag,
+      protocol: "vless",
+      settings: {
+        vnext: [{
+          address,
+          port,
+          users: [{ id: uuid, encryption: "none", flow }]
+        }]
+      },
+      streamSettings: {
+        network,
+        security,
+        tlsSettings: security === "tls" ? { serverName: sni } : undefined,
+        realitySettings: security === "reality" ? { serverName: sni } : undefined,
+        wsSettings: network === "ws" ? { path } : undefined,
+        grpcSettings: network === "grpc" ? { serviceName: path } : undefined
+      }
+    };
+  } else if (protocol === "vmess") {
+    return {
+      tag: outTag,
+      protocol: "vmess",
+      settings: {
+        vnext: [{
+          address,
+          port,
+          users: [{ id: uuid, alterId: 0, security: "auto" }]
+        }]
+      },
+      streamSettings: {
+        network,
+        security,
+        tlsSettings: security === "tls" ? { serverName: sni } : undefined,
+        wsSettings: network === "ws" ? { path } : undefined,
+        grpcSettings: network === "grpc" ? { serviceName: path } : undefined
+      }
+    };
+  } else if (protocol === "trojan") {
+    return {
+      tag: outTag,
+      protocol: "trojan",
+      settings: {
+        servers: [{ address, port, password: uuid }]
+      },
+      streamSettings: {
+        network,
+        security,
+        tlsSettings: security === "tls" ? { serverName: sni } : undefined,
+        wsSettings: network === "ws" ? { path } : undefined,
+        grpcSettings: network === "grpc" ? { serviceName: path } : undefined
+      }
+    };
+  } else if (protocol === "shadowsocks") {
+    return {
+      tag: outTag,
+      protocol: "shadowsocks",
+      settings: {
+        servers: [{ address, port, method: inb.method || "aes-256-gcm", password: uuid }]
+      }
+    };
+  }
+
+  // Fallback
+  return {
+    tag: outTag,
+    protocol: "vless",
+    settings: {
+      vnext: [{ address, port, users: [{ id: uuid, encryption: "none" }] }]
+    }
+  };
+}
+
 // 2. Generate Client Multi-Inbound Xray & Tun2socks Configuration
 app.get("/api/bridge/config", (req, res) => {
   const inboundsList = dbData.inbounds.length > 0 ? dbData.inbounds : [
@@ -2303,7 +2437,6 @@ app.get("/api/bridge/config", (req, res) => {
     const ports = getInboundBridgePorts(inb, idx);
     const inTagSocks = `socks-in-${idx}`;
     const inTagTproxy = `tproxy-in-${idx}`;
-    const outTag = `out-inb-${idx}-${inb.tag.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 
     // Add local SOCKS5 inbound for this specific node
     xrayInbounds.push({
@@ -2324,17 +2457,37 @@ app.get("/api/bridge/config", (req, res) => {
       streamSettings: { sockopt: { tproxy: "tproxy" } }
     });
 
-    // Add dedicated Xray Outbound strictly connecting to this Sanaei Inbound
+    // 1. Fallback Outbound (uses default/fallback UUID)
+    const fallbackTag = `out-inb-${idx}-fallback`;
     const mockLink = generateMockLinks(`bridge-node-${idx}`, "11111111-2222-3333-4444-555555555555")[0];
-    const nodeOutbound = generateXrayOutboundFromLink(mockLink, inb.serverIp || "127.0.0.1", outTag);
-    nodeOutbound.settings.vnext[0].port = inb.port || 443;
-    xrayOutbounds.push(nodeOutbound);
+    const fallbackOutbound = generateXrayOutboundFromLink(mockLink, inb.serverIp || "127.0.0.1", fallbackTag);
+    fallbackOutbound.settings.vnext[0].port = inb.port || 443;
+    xrayOutbounds.push(fallbackOutbound);
 
-    // Explicitly route traffic from this inbound's socks/tproxy port to its specific outbound
+    // 2. Dynamic Outbounds per Active Subscription Client
+    dbData.subscriptions.forEach((sub, subIdx) => {
+      const clientIp = `10.8.0.${100 + subIdx}`;
+      const ovpnClientIp = `10.10.0.${100 + subIdx}`;
+      const l2tpClientIp = `10.9.0.${100 + subIdx}`;
+      
+      const userOutboundTag = `out-inb-${idx}-sub-${subIdx}`;
+      const userOutbound = generateXrayOutboundForInboundAndUser(inb, sub.uuid, userOutboundTag);
+      xrayOutbounds.push(userOutbound);
+
+      // Route this specific client IP to their dedicated outbound with their real UUID
+      routingRules.push({
+        type: "field",
+        inboundTag: [inTagSocks, inTagTproxy],
+        sourceIP: [clientIp, ovpnClientIp, l2tpClientIp],
+        outTag: userOutboundTag
+      });
+    });
+
+    // 3. Fallback Route for any other/anonymous clients using the fallback outbound
     routingRules.push({
       type: "field",
       inboundTag: [inTagSocks, inTagTproxy],
-      outTag: outTag
+      outTag: fallbackTag
     });
   });
 
