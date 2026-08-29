@@ -31,7 +31,8 @@ import {
   CheckCircle2,
   AlertTriangle,
   Terminal,
-  Zap
+  Zap,
+  Pencil
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { Panel, SmartSubscription, MockNode, InboundNode } from "./types";
@@ -61,6 +62,8 @@ export default function App() {
   const [newInboundL2tpPsk, setNewInboundL2tpPsk] = useState("SanaeiL2TPSecureKey");
   const [newInboundNotes, setNewInboundNotes] = useState("");
   const [isCreatingInbound, setIsCreatingInbound] = useState(false);
+  const [editingInbound, setEditingInbound] = useState<InboundNode | null>(null);
+  const [isUpdatingInbound, setIsUpdatingInbound] = useState(false);
 
   // Global VPN Settings state
   const [l2tpServerIpState, setL2tpServerIpState] = useState("");
@@ -439,6 +442,31 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
       console.error("Failed to create inbound", err);
     } finally {
       setIsCreatingInbound(false);
+    }
+  };
+
+  const handleUpdateInbound = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingInbound) return;
+
+    setIsUpdatingInbound(true);
+    try {
+      const res = await fetch(`/api/inbounds/${editingInbound.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(editingInbound),
+      });
+
+      if (res.ok) {
+        await fetchInbounds();
+        setEditingInbound(null);
+      } else {
+        alert("Failed to update inbound");
+      }
+    } catch (err) {
+      console.error("Failed to update inbound", err);
+    } finally {
+      setIsUpdatingInbound(false);
     }
   };
 
@@ -1348,8 +1376,11 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                             </p>
                           </div>
                           <button
-                            onClick={() => downloadBlob(`L2TP_${selectedSub.username}.mobileconfig`, getAppleMobileConfig(selectedSub), "application/x-apple-aspen-config")}
-                            className="bg-[#4F46E5] text-white hover:bg-[#4338CA] px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
+                            onClick={() => {
+                              const inb = getActiveInbound();
+                              downloadBlob(`L2TP_${inb?.tag || 'Default'}_${selectedSub.username}.mobileconfig`, getAppleMobileConfig(selectedSub, inb), "application/x-apple-aspen-config");
+                            }}
+                            className="bg-[#4F46E5] text-white hover:bg-[#4338CA] px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all cursor-pointer"
                           >
                             <Download className="h-3 w-3" />
                             <span>{lang === "fa" ? "دانلود پروفایل iOS" : "Download .mobileconfig"}</span>
@@ -1365,23 +1396,23 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <span className="text-gray-400 block text-[9px] font-bold">Description</span>
-                            <span className="font-mono text-gray-800">Sanaei L2TP</span>
+                            <span className="font-mono text-gray-800">Sanaei L2TP ({getActiveInbound()?.tag || "Default"})</span>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">Server</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpServerIp, "ios_server")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1", "ios_server")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "ios_server" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
-                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpServerIp}</code>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1"}</code>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">Account</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpUser, "ios_account")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(selectedSub.l2tpUser, "ios_account")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "ios_account" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
@@ -1396,7 +1427,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">Password</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpPass, "ios_pass")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(selectedSub.l2tpPass, "ios_pass")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "ios_pass" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
@@ -1406,11 +1437,11 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">Secret</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpPsk, "ios_secret")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey", "ios_secret")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "ios_secret" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
-                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpPsk}</code>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey"}</code>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
@@ -1421,8 +1452,12 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                         <div className="flex justify-end pt-1">
                           <button
-                            onClick={() => triggerCopy(`Type: L2TP\nServer: ${selectedSub.l2tpServerIp}\nAccount: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}\nSecret: ${selectedSub.l2tpPsk}\nSend All Traffic: ON`, "ios_all")}
-                            className="text-[#4F46E5] hover:underline text-[10px] font-bold flex items-center gap-1"
+                            onClick={() => {
+                              const srv = getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1";
+                              const psk = getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey";
+                              triggerCopy(`Type: L2TP\nServer: ${srv}\nAccount: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}\nSecret: ${psk}\nSend All Traffic: ON`, "ios_all");
+                            }}
+                            className="text-[#4F46E5] hover:underline text-[10px] font-bold flex items-center gap-1 cursor-pointer"
                           >
                             {copiedId === "ios_all" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                             <span>{lang === "fa" ? "کپی یکجای تمام مشخصات آیفون" : "Copy All iOS Fields"}</span>
@@ -1452,7 +1487,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px]">
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <span className="text-gray-400 block text-[9px] font-bold">Name</span>
-                            <span className="font-mono text-gray-800 font-semibold">Sanaei L2TP</span>
+                            <span className="font-mono text-gray-800 font-semibold">Sanaei L2TP ({getActiveInbound()?.tag || "Default"})</span>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
@@ -1464,11 +1499,11 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">Server address</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpServerIp, "and_server")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1", "and_server")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "and_server" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
-                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpServerIp}</code>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1"}</code>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
@@ -1484,17 +1519,17 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">IPSec pre-shared key</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpPsk, "and_psk")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey", "and_psk")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "and_psk" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
-                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpPsk}</code>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey"}</code>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">Username</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpUser, "and_user")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(selectedSub.l2tpUser, "and_user")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "and_user" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
@@ -1504,7 +1539,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">Password</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpPass, "and_pass")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(selectedSub.l2tpPass, "and_pass")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "and_pass" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
@@ -1514,8 +1549,12 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                         <div className="flex justify-end pt-1">
                           <button
-                            onClick={() => triggerCopy(`Name: Sanaei L2TP\nType: L2TP/IPSec PSK\nServer address: ${selectedSub.l2tpServerIp}\nIPSec pre-shared key: ${selectedSub.l2tpPsk}\nUsername: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}`, "and_all")}
-                            className="text-green-600 hover:underline text-[10px] font-bold flex items-center gap-1"
+                            onClick={() => {
+                              const srv = getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1";
+                              const psk = getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey";
+                              triggerCopy(`Name: Sanaei L2TP\nType: L2TP/IPSec PSK\nServer address: ${srv}\nIPSec pre-shared key: ${psk}\nUsername: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}`, "and_all");
+                            }}
+                            className="text-green-600 hover:underline text-[10px] font-bold flex items-center gap-1 cursor-pointer"
                           >
                             {copiedId === "and_all" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                             <span>{lang === "fa" ? "کپی یکجای مشخصات اندروید" : "Copy All Android Fields"}</span>
@@ -1540,8 +1579,11 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                             </p>
                           </div>
                           <button
-                            onClick={() => downloadBlob(`L2TP_${selectedSub.username}.pbk`, getWindowsPbk(selectedSub), "text/plain")}
-                            className="bg-blue-600 text-white hover:bg-blue-700 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
+                            onClick={() => {
+                              const inb = getActiveInbound();
+                              downloadBlob(`L2TP_${inb?.tag || 'Default'}_${selectedSub.username}.pbk`, getWindowsPbk(selectedSub, inb), "text/plain");
+                            }}
+                            className="bg-blue-600 text-white hover:bg-blue-700 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all cursor-pointer"
                           >
                             <Download className="h-3 w-3" />
                             <span>{lang === "fa" ? "دانلود دایلر ویندوز (.pbk)" : "Download Windows .pbk"}</span>
@@ -1557,17 +1599,17 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <span className="text-gray-400 block text-[9px] font-bold">Connection name</span>
-                            <span className="font-mono text-gray-800">Sanaei L2TP VPN</span>
+                            <span className="font-mono text-gray-800">Sanaei L2TP ({getActiveInbound()?.tag || "Default"})</span>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">Server name or address</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpServerIp, "win_server")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1", "win_server")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "win_server" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
-                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpServerIp}</code>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1"}</code>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
@@ -1578,11 +1620,11 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">Pre-shared key</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpPsk, "win_psk")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey", "win_psk")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "win_psk" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
-                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpPsk}</code>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey"}</code>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
@@ -1593,7 +1635,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">User name</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpUser, "win_user")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(selectedSub.l2tpUser, "win_user")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "win_user" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
@@ -1603,7 +1645,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
                               <span className="text-gray-400 block text-[9px] font-bold">Password</span>
-                              <button onClick={() => triggerCopy(selectedSub.l2tpPass, "win_pass")} className="text-gray-400 hover:text-gray-900">
+                              <button onClick={() => triggerCopy(selectedSub.l2tpPass, "win_pass")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "win_pass" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
@@ -1613,8 +1655,12 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                         <div className="flex justify-end pt-1">
                           <button
-                            onClick={() => triggerCopy(`VPN provider: Windows (built-in)\nServer name or address: ${selectedSub.l2tpServerIp}\nVPN type: L2TP/IPsec with pre-shared key\nPre-shared key: ${selectedSub.l2tpPsk}\nUser name: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}`, "win_all")}
-                            className="text-blue-600 hover:underline text-[10px] font-bold flex items-center gap-1"
+                            onClick={() => {
+                              const srv = getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1";
+                              const psk = getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey";
+                              triggerCopy(`VPN provider: Windows (built-in)\nServer name or address: ${srv}\nVPN type: L2TP/IPsec with pre-shared key\nPre-shared key: ${psk}\nUser name: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}`, "win_all");
+                            }}
+                            className="text-blue-600 hover:underline text-[10px] font-bold flex items-center gap-1 cursor-pointer"
                           >
                             {copiedId === "win_all" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                             <span>{lang === "fa" ? "کپی یکجای مشخصات ویندوز" : "Copy All Windows Fields"}</span>
@@ -1634,8 +1680,8 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                             </h4>
                             <p className="text-[10px] text-gray-500 mt-0.5">
                               {lang === "fa"
-                                ? "بارکد زیر حاوی کانفیگ خام و استاندارد وایرگارد است و مستقیماً توسط اپلیکیشن WireGuard در گوشی خوانده می‌شود:"
-                                : "This QR code directly encodes the full WireGuard configuration syntax for instant import:"}
+                                ? "بارکد و تنظیمات زیر مستقیماً بر اساس اینباند انتخابی تنظیم شده‌اند:"
+                                : "The QR code and parameters below are strictly bound to the active inbound:"}
                             </p>
                           </div>
                           
@@ -1645,32 +1691,32 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                                 const inb = getActiveInbound();
                                 downloadBlob(`WireGuard_${inb?.tag || 'Default'}_${selectedSub.username}.conf`, getWireguardConf(selectedSub, inb), "text/plain");
                               }}
-                              className="bg-emerald-600 text-white hover:bg-emerald-700 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
+                              className="bg-emerald-600 text-white hover:bg-emerald-700 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all cursor-pointer"
                             >
                               <Download className="h-3 w-3" />
-                              <span>{lang === "fa" ? "دانلود .conf این اینباند" : "Download .conf"}</span>
+                              <span>{lang === "fa" ? `دانلود .conf (${getActiveInbound()?.tag || "این اینباند"})` : "Download .conf"}</span>
                             </button>
                             <button
                               onClick={() => {
                                 if (inbounds.length <= 1) {
-                                  downloadBlob(`WireGuard_${selectedSub.username}.conf`, getWireguardConf(selectedSub), "text/plain");
+                                  downloadBlob(`WireGuard_${selectedSub.username}.conf`, getWireguardConf(selectedSub, getActiveInbound()), "text/plain");
                                 } else {
                                   inbounds.forEach((inb, idx) => {
                                     setTimeout(() => {
-                                      downloadBlob(`WireGuard_${inb.tag}_${selectedSub.username}.conf`, getWireguardConf(selectedSub, inb), "text/plain");
+                                      downloadBlob(`WireGuard_${inb.tag.replace(/[^a-zA-Z0-9_-]/g, "_")}_${selectedSub.username}.conf`, getWireguardConf(selectedSub, inb), "text/plain");
                                     }, idx * 250);
                                   });
                                 }
                               }}
-                              className="bg-emerald-800 text-white hover:bg-emerald-900 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
+                              className="bg-emerald-800 text-white hover:bg-emerald-900 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all cursor-pointer"
                               title={lang === "fa" ? "دانلود مجزای فایل کانفیگ برای هر اینباند" : "Download configs for all configured inbounds"}
                             >
                               <Download className="h-3 w-3" />
                               <span>{lang === "fa" ? `دانلود همه اینباندها (${inbounds.length})` : `All Inbounds (${inbounds.length})`}</span>
                             </button>
                             <button
-                              onClick={() => triggerCopy(getWireguardConf(selectedSub), "wg_full_conf")}
-                              className="bg-white text-emerald-800 border border-emerald-200 hover:bg-emerald-50 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 transition-all"
+                              onClick={() => triggerCopy(getWireguardConf(selectedSub, getActiveInbound()), "wg_full_conf")}
+                              className="bg-white text-emerald-800 border border-emerald-200 hover:bg-emerald-50 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer"
                             >
                               {copiedId === "wg_full_conf" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               <span>{lang === "fa" ? "کپی کانفیگ" : "Copy Conf"}</span>
@@ -1701,7 +1747,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                             <div className="bg-white p-2 rounded-xl border border-gray-150">
                               <div className="flex items-center justify-between mb-0.5">
                                 <span className="text-gray-400 font-bold text-[8px]">[Interface] PrivateKey</span>
-                                <button onClick={() => triggerCopy(ensureValidWgKey(selectedSub.wireguardPrivateKey), "wg_priv")} className="text-gray-400 hover:text-gray-900">
+                                <button onClick={() => triggerCopy(ensureValidWgKey(selectedSub.wireguardPrivateKey), "wg_priv")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                   {copiedId === "wg_priv" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
                                 </button>
                               </div>
@@ -1711,7 +1757,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                             <div className="bg-white p-2 rounded-xl border border-gray-150">
                               <div className="flex items-center justify-between mb-0.5">
                                 <span className="text-gray-400 font-bold text-[8px]">[Interface] Address</span>
-                                <button onClick={() => triggerCopy(selectedSub.wireguardAddress || "10.8.0.2/24", "wg_addr")} className="text-gray-400 hover:text-gray-900">
+                                <button onClick={() => triggerCopy(selectedSub.wireguardAddress || "10.8.0.2/24", "wg_addr")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                   {copiedId === "wg_addr" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
                                 </button>
                               </div>
@@ -1726,7 +1772,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                                   const host = (inb?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1").replace(/^https?:\/\//i, "").split("/")[0].split(":")[0];
                                   const port = inb?.wgPort || inb?.port || wgServerPortState || 51820;
                                   triggerCopy(`${host}:${port}`, "wg_end");
-                                }} className="text-gray-400 hover:text-gray-900">
+                                }} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                   {copiedId === "wg_end" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
                                 </button>
                               </div>
@@ -1747,12 +1793,15 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                                   const inb = getActiveInbound();
                                   const pub = ensureValidWgKey(inb?.wgServerPublicKey || wgServerPublicKeyState || selectedSub.wireguardPublicKey);
                                   triggerCopy(pub, "wg_pub");
-                                }} className="text-gray-400 hover:text-gray-900">
+                                }} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                   {copiedId === "wg_pub" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
                                 </button>
                               </div>
                               <code className="font-mono text-gray-800 break-all text-[9px]">
-                                {ensureValidWgKey(getActiveInbound()?.wgServerPublicKey || wgServerPublicKeyState || selectedSub.wireguardPublicKey)}
+                                {(() => {
+                                  const inb = getActiveInbound();
+                                  return ensureValidWgKey(inb?.wgServerPublicKey || wgServerPublicKeyState || selectedSub.wireguardPublicKey);
+                                })()}
                               </code>
                             </div>
 
@@ -1780,7 +1829,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                           {showRawWg && (
                             <pre className="mt-2 text-[9px] font-mono bg-slate-900 text-emerald-400 p-3 rounded-xl overflow-x-auto leading-relaxed border border-slate-800">
-                              {getWireguardConf(selectedSub)}
+                              {getWireguardConf(selectedSub, getActiveInbound())}
                             </pre>
                           )}
                         </div>
@@ -1879,14 +1928,27 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-2 text-[10px] bg-white p-2.5 rounded-xl border border-gray-150 font-sans">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[10px] bg-white p-2.5 rounded-xl border border-gray-150 font-sans">
+                          <div>
+                            <span className="text-gray-400 block text-[8px] font-bold mb-0.5">Remote Server & Port</span>
+                            <div className="flex items-center justify-between">
+                              <code className="font-mono text-gray-700 break-all">{`${getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1"}:${getActiveInbound()?.openvpnPort || selectedSub.openvpnPort || 1194} (${getActiveInbound()?.openvpnProto || "udp"})`}</code>
+                              <button 
+                                onClick={() => triggerCopy(`${getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1"}:${getActiveInbound()?.openvpnPort || selectedSub.openvpnPort || 1194}`, "ovpn_remote")}
+                                className="text-gray-400 hover:text-gray-900 ml-1 cursor-pointer"
+                              >
+                                {copiedId === "ovpn_remote" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                          </div>
+
                           <div>
                             <span className="text-gray-400 block text-[8px] font-bold mb-0.5">Username</span>
                             <div className="flex items-center justify-between">
                               <code className="font-mono text-gray-700">{selectedSub.openvpnUser || `vpn_${selectedSub.username}`}</code>
                               <button 
                                 onClick={() => triggerCopy(selectedSub.openvpnUser || `vpn_${selectedSub.username}`, "ovpn_user")}
-                                className="text-gray-400 hover:text-gray-900 ml-1"
+                                className="text-gray-400 hover:text-gray-900 ml-1 cursor-pointer"
                               >
                                 {copiedId === "ovpn_user" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
@@ -1899,7 +1961,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                               <code className="font-mono text-gray-700">{selectedSub.openvpnPass || "SanaeiOVPNPass"}</code>
                               <button 
                                 onClick={() => triggerCopy(selectedSub.openvpnPass || "SanaeiOVPNPass", "ovpn_pass")}
-                                className="text-gray-400 hover:text-gray-900 ml-1"
+                                className="text-gray-400 hover:text-gray-900 ml-1 cursor-pointer"
                               >
                                 {copiedId === "ovpn_pass" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
@@ -2019,6 +2081,13 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                               className="text-[10px] bg-white border border-gray-200 text-indigo-600 hover:bg-indigo-50 px-2.5 py-1 rounded-xl font-bold transition-all shadow-2xs"
                             >
                               {lang === "fa" ? "مشاهده کانفیگ‌ها" : "View Configs"}
+                            </button>
+                            <button
+                              onClick={() => setEditingInbound({ ...inb })}
+                              className="p-1 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
+                              title={lang === "fa" ? "ویرایش مشخصات اینباند" : "Edit Inbound"}
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
                             </button>
                             <button
                               onClick={(e) => handleDeleteInbound(inb.id, e)}
@@ -3370,6 +3439,169 @@ def create_customer_subscription(user_id, username):
                 {lang === "fa" ? "متوجه شدم و بستن راهنما" : "Got it / Close"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Inbound Modal */}
+      {editingInbound && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in">
+          <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6 space-y-4 border border-gray-100">
+            <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 bg-indigo-50 text-indigo-600 rounded-xl">
+                  <Pencil className="h-4 w-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-gray-900">
+                    {lang === "fa" ? `ویرایش مشخصات اینباند: ${editingInbound.tag}` : `Edit Inbound: ${editingInbound.tag}`}
+                  </h3>
+                  <p className="text-[10px] text-gray-500">
+                    {lang === "fa" ? "تنظیمات دقیق IP، پورت و کلیدهای این اینباند را تغییر دهید" : "Modify IP, ports, and cryptographic keys for this inbound"}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setEditingInbound(null)}
+                className="text-gray-400 hover:text-gray-600 text-lg leading-none"
+              >
+                ×
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateInbound} className="space-y-3 text-xs">
+              <div>
+                <label className="block text-gray-700 font-bold mb-1">
+                  {lang === "fa" ? "نام / تگ اینباند:" : "Inbound Tag:"}
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editingInbound.tag}
+                  onChange={(e) => setEditingInbound({ ...editingInbound, tag: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-sans"
+                />
+              </div>
+
+              <div>
+                <label className="block text-gray-700 font-bold mb-1">
+                  {lang === "fa" ? "آدرس آی‌پی عمومی سرور یا دامنه:" : "Server IP or Domain:"}
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={editingInbound.serverIp}
+                  onChange={(e) => setEditingInbound({ ...editingInbound, serverIp: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-mono"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-gray-700 font-bold mb-1">
+                    {lang === "fa" ? "پورت WireGuard:" : "WireGuard Port:"}
+                  </label>
+                  <input
+                    type="number"
+                    value={editingInbound.wgPort || editingInbound.port || 51820}
+                    onChange={(e) => setEditingInbound({ ...editingInbound, wgPort: parseInt(e.target.value) || 51820 })}
+                    className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-gray-700 font-bold mb-1">
+                    {lang === "fa" ? "پورت OpenVPN:" : "OpenVPN Port:"}
+                  </label>
+                  <input
+                    type="number"
+                    value={editingInbound.openvpnPort || 1194}
+                    onChange={(e) => setEditingInbound({ ...editingInbound, openvpnPort: parseInt(e.target.value) || 1194 })}
+                    className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-gray-700 font-bold mb-1">
+                    {lang === "fa" ? "پروتکل OpenVPN:" : "OpenVPN Proto:"}
+                  </label>
+                  <select
+                    value={editingInbound.openvpnProto || "udp"}
+                    onChange={(e) => setEditingInbound({ ...editingInbound, openvpnProto: e.target.value as any })}
+                    className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all"
+                  >
+                    <option value="udp">UDP (Recommended)</option>
+                    <option value="tcp">TCP</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-gray-700 font-bold mb-1">
+                    {lang === "fa" ? "کلید IPSec PSK:" : "L2TP IPSec PSK:"}
+                  </label>
+                  <input
+                    type="text"
+                    value={editingInbound.l2tpPsk || "SanaeiL2TPSecureKey"}
+                    onChange={(e) => setEditingInbound({ ...editingInbound, l2tpPsk: e.target.value })}
+                    className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-gray-700 font-bold mb-1">
+                  {lang === "fa" ? "کلید عمومی سرور WireGuard (اختیاری):" : "WireGuard Server PublicKey (Optional):"}
+                </label>
+                <input
+                  type="text"
+                  placeholder="Leave empty to use global setting"
+                  value={editingInbound.wgServerPublicKey || ""}
+                  onChange={(e) => setEditingInbound({ ...editingInbound, wgServerPublicKey: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-mono text-[10px]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-gray-700 font-bold mb-1">
+                  {lang === "fa" ? "توضیحات / یادداشت:" : "Notes:"}
+                </label>
+                <input
+                  type="text"
+                  value={editingInbound.notes || ""}
+                  onChange={(e) => setEditingInbound({ ...editingInbound, notes: e.target.value })}
+                  className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-sans"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setEditingInbound(null)}
+                  className="px-4 py-2 rounded-xl border border-gray-200 text-gray-700 hover:bg-gray-50 font-bold transition-all"
+                >
+                  {lang === "fa" ? "انصراف" : "Cancel"}
+                </button>
+                <button
+                  type="submit"
+                  disabled={isUpdatingInbound}
+                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 font-bold transition-all shadow-sm flex items-center gap-1.5"
+                >
+                  {isUpdatingInbound ? (
+                    <>
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      <span>{lang === "fa" ? "در حال ذخیره..." : "Saving..."}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="h-3.5 w-3.5" />
+                      <span>{lang === "fa" ? "ذخیره تغییرات" : "Save Changes"}</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
