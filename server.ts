@@ -797,7 +797,6 @@ MIICXAIBAAKBgQC/2Jj49Xu818jNrPRfJ+gNtjN/AweAdhR9Yx8+EFC3E37CE600
 
 // 9. Server installation script downloader
 app.get("/install.sh", (req, res) => {
-  const fs = require("fs");
   const installPath = path.join(process.cwd(), "install.sh");
   if (fs.existsSync(installPath)) {
     res.setHeader("Content-Type", "text/plain");

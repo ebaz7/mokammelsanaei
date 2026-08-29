@@ -778,6 +778,73 @@ export default function App() {
                     </div>
                   </div>
 
+                  {/* Android Native VPN (IKEv2/IPsec) [Android 12+ Replacement for L2TP] */}
+                  <div className="space-y-3 pt-2 border-t border-gray-100">
+                    <h4 className="text-xs font-bold text-gray-900 border-r-2 border-green-500 pr-2 flex items-center gap-1.5">
+                      <Smartphone className="h-4 w-4 text-green-500 animate-pulse" />
+                      {lang === "fa" ? "جایگزین اندروید ۱۲+ (IKEv2/IPsec)" : "Android 12+ Native VPN (IKEv2/IPsec)"}
+                    </h4>
+                    <p className="text-[10px] text-gray-500">
+                      {lang === "fa" 
+                        ? "در اندروید ۱۲ به بالا پروتکل L2TP حذف شده است. برای اتصال بدون هیچ برنامه‌ای در تنظیمات گوشی، از پروفایل IKEv2 استفاده کنید:" 
+                        : "Android 12+ has removed L2TP. To connect natively from your phone settings without any app, use this IKEv2 profile:"}
+                    </p>
+                    
+                    <div className="grid grid-cols-2 gap-3 text-[10px]">
+                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
+                        <span className="text-gray-400 block text-[8px] font-semibold mb-1">
+                          {lang === "fa" ? "نوع اتصال VPN" : "VPN Type"}
+                        </span>
+                        <code className="font-mono text-gray-800 break-all font-bold">IKEv2/IPsec MSCHAPv2</code>
+                      </div>
+
+                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
+                        <span className="text-gray-400 block text-[8px] font-semibold mb-1">
+                          {lang === "fa" ? "آدرس سرور / Server Address" : "Server IP / DNS"}
+                        </span>
+                        <div className="flex items-center justify-between">
+                          <code className="font-mono text-gray-800 break-all">{selectedSub.l2tpServerIp}</code>
+                          <button 
+                            onClick={() => triggerCopy(selectedSub.l2tpServerIp, "ikev2_ip")}
+                            className="text-gray-400 hover:text-gray-900 transition-all mr-1"
+                          >
+                            {copiedId === "ikev2_ip" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
+                        <span className="text-gray-400 block text-[8px] font-semibold mb-1">
+                          {lang === "fa" ? "شناسه IPSec / شناسه محلی" : "IPSec Identifier / Local ID"}
+                        </span>
+                        <div className="flex items-center justify-between">
+                          <code className="font-mono text-gray-800 break-all">{selectedSub.l2tpServerIp}</code>
+                          <button 
+                            onClick={() => triggerCopy(selectedSub.l2tpServerIp, "ikev2_id")}
+                            className="text-gray-400 hover:text-gray-900 transition-all mr-1"
+                          >
+                            {copiedId === "ikev2_id" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
+                        <span className="text-gray-400 block text-[8px] font-semibold mb-1">
+                          {lang === "fa" ? "نام کاربری و کلمه عبور" : "Username & Password"}
+                        </span>
+                        <div className="flex items-center justify-between">
+                          <code className="font-mono text-gray-800 break-all">{selectedSub.l2tpUser}</code>
+                          <button 
+                            onClick={() => triggerCopy(`${selectedSub.l2tpUser} | ${selectedSub.l2tpPass}`, "ikev2_credentials")}
+                            className="text-[#4F46E5] hover:underline text-[9px] font-bold"
+                          >
+                            {copiedId === "ikev2_credentials" ? (lang === "fa" ? "کپی شد" : "Copied") : (lang === "fa" ? "کپی هردو" : "Copy Both")}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Smart Subscription Links */}
                   <div className="space-y-3 pt-2 border-t border-gray-100">
                     <h4 className="text-xs font-bold text-gray-900 border-r-2 border-[#4F46E5] pr-2">
@@ -1080,6 +1147,71 @@ export default function App() {
                   </div>
                 </form>
               </div>
+
+              {/* Bot API Integration Details Card */}
+              <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 space-y-4">
+                <div className="flex items-center gap-2">
+                  <div className="bg-green-50 text-green-600 p-1.5 rounded-lg">
+                    <Key className="h-4.5 w-4.5 stroke-[2.5px]" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900">
+                      {lang === "fa" ? "اتصال آسان به ربات تلگرام (API)" : "Easy Telegram Bot API Integration"}
+                    </h3>
+                    <p className="text-[10px] text-gray-500 mt-0.5">
+                      {lang === "fa" ? "وب‌سرویس اختصاصی این پنل برای اتصال آنی به ربات شما" : "Direct REST API for automated bot integrations"}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-3 text-xs">
+                  <div className="bg-gray-50 rounded-xl p-3.5 border border-gray-100 space-y-2">
+                    <div className="flex items-center justify-between text-[10px] text-gray-400 font-semibold uppercase tracking-wider">
+                      <span>{lang === "fa" ? "متد و آدرس وب‌سرویس" : "API Method & URL"}</span>
+                      <span className="bg-green-100 text-green-800 px-1.5 py-0.5 rounded font-mono font-bold">POST</span>
+                    </div>
+                    <div className="flex items-center justify-between bg-white p-2 rounded-lg border border-gray-100">
+                      <code className="text-[10px] text-gray-800 font-mono break-all font-semibold">
+                        {`${window.location.origin}/api/users`}
+                      </code>
+                      <button
+                        onClick={() => triggerCopy(`${window.location.origin}/api/users`, "bot_api_url")}
+                        className="text-gray-400 hover:text-gray-900 transition-all mr-1.5"
+                      >
+                        {copiedId === "bot_api_url" ? <Check className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <span className="block text-[10px] font-semibold text-gray-500">
+                        {lang === "fa" ? "ساختار بدنه ارسالی (JSON Payload)" : "JSON Request Body"}
+                      </span>
+                      <button
+                        onClick={() => triggerCopy(`{\n  "panelId": "${selectedPanel || "your_panel_id"}",\n  "username": "client_tg_username",\n  "autoSwitchEnabled": true\n}`, "bot_api_payload")}
+                        className="text-[#4F46E5] text-[10px] font-bold hover:underline"
+                      >
+                        {copiedId === "bot_api_payload" ? (lang === "fa" ? "کپی شد" : "Copied") : (lang === "fa" ? "کپی نمونه" : "Copy Payload")}
+                      </button>
+                    </div>
+                    <pre className="text-[9px] bg-slate-900 text-slate-200 font-mono p-3 rounded-xl overflow-x-auto leading-relaxed">
+{`{
+  "panelId": "${selectedPanel || "your_panel_id"}",
+  "username": "client_tg_username",
+  "autoSwitchEnabled": true
+}`}
+                    </pre>
+                  </div>
+
+                  <p className="text-[9px] text-gray-500 leading-relaxed bg-amber-50/50 p-2.5 rounded-xl border border-amber-100/30">
+                    {lang === "fa" 
+                      ? "💡 ربات تلگرام شما به جای ارتباط سخت با کوکی‌های سنایی، کافیست به آدرس بالا درخواست بفرستد تا فوراً پاسخ حاوی تمام لینک‌های هوشمند کلش، فایل‌های OVPN و اطلاعات L2TP/IKEv2 را دریافت کند."
+                      : "💡 Instead of wrestling with Sanaei's cookie/login API, your bot only needs to call this endpoint. It immediately returns high-speed L2TP/IKEv2 configurations and smart subscription URLs."}
+                  </p>
+                </div>
+              </div>
+
             </div>
           </div>
         )}
@@ -1209,7 +1341,7 @@ export default function App() {
                 </h4>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs text-gray-600">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-xs text-gray-600">
                 <div className="space-y-3">
                   <h5 className="font-bold text-gray-800 flex items-center gap-1.5">
                     <Monitor className="h-4 w-4 text-[#4F46E5]" />
@@ -1233,6 +1365,19 @@ export default function App() {
                     <li>{lang === "fa" ? "به منوی تنظیمات گوشی رفته و روی Profile Downloaded بزنید." : "Go to iPhone Settings and tap on 'Profile Downloaded'."}</li>
                     <li>{lang === "fa" ? "پروفایل L2TP را با زدن روی دکمه Install تایید و نصب کنید." : "Verify and click 'Install' to let iOS construct the VPN connection."}</li>
                     <li>{lang === "fa" ? "حالا به قسمت VPN در تنظیمات بروید و سوییچ اتصال را فعال کنید." : "Now go to VPN Settings and toggle the connection switch on."}</li>
+                  </ul>
+                </div>
+
+                <div className="space-y-3">
+                  <h5 className="font-bold text-gray-800 flex items-center gap-1.5">
+                    <Smartphone className="h-4 w-4 text-green-600" />
+                    {lang === "fa" ? "آموزش در اندروید ۱۲+ (IKEv2/IPsec)" : "Android 12+ Setup Guide"}
+                  </h5>
+                  <ul className="list-decimal list-inside space-y-2 leading-relaxed">
+                    <li>{lang === "fa" ? "به تنظیمات گوشی (Settings) -> شبکه و اینترنت (VPN) بروید." : "Go to Settings -> Network & Internet -> VPN."}</li>
+                    <li>{lang === "fa" ? "یک کانکشن جدید بسازید و نوع آن را روی IKEv2/IPsec MSCHAPv2 تنظیم کنید." : "Create a new VPN and set type to IKEv2/IPsec MSCHAPv2."}</li>
+                    <li>{lang === "fa" ? "آدرس سرور و شناسه IPSec (هر دو همان IP سرور) را وارد کنید." : "Input Server Address and IPSec Identifier (both are your Server IP)."}</li>
+                    <li>{lang === "fa" ? "نام کاربری و کلمه عبور را وارد کرده و دکمه ذخیره و اتصال را بزنید." : "Enter Username & Password, tap Save and toggle the switch on."}</li>
                   </ul>
                 </div>
               </div>
