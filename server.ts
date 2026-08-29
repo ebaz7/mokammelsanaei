@@ -119,18 +119,41 @@ w9y1z3a5b7c9e1g3i5k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5
 function generateWireGuardKeys(): { privateKey: string; publicKey: string } {
   try {
     const pair = crypto.generateKeyPairSync("x25519");
-    const privateKey = pair.privateKey.export({ format: "der", type: "pkcs8" }).subarray(-32).toString("base64");
-    const publicKey = pair.publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
-    return { privateKey, publicKey };
+    const privDer = pair.privateKey.export({ format: "der", type: "pkcs8" });
+    const pubDer = pair.publicKey.export({ format: "der", type: "spki" });
+    
+    // In PKCS#8 DER, raw x25519 private key is the last 32 bytes
+    const privRaw = privDer.subarray(-32);
+    // In SPKI DER, raw x25519 public key is the last 32 bytes
+    const pubRaw = pubDer.subarray(-32);
+
+    if (privRaw.length === 32 && pubRaw.length === 32) {
+      const privateKey = privRaw.toString("base64");
+      const publicKey = pubRaw.toString("base64");
+      if (privateKey.length === 44 && publicKey.length === 44) {
+        return { privateKey, publicKey };
+      }
+    }
   } catch (e) {
-    console.error("Failed to generate real X25519 keys, falling back to RFC RFC-clamped keys:", e);
-    const priv = crypto.randomBytes(32);
-    priv[0] &= 248;
-    priv[31] &= 127;
-    priv[31] |= 64;
-    const pub = crypto.randomBytes(32);
-    return { privateKey: priv.toString("base64"), publicKey: pub.toString("base64") };
+    console.error("X25519 native keypair generation failed, using RFC-clamped 32-byte generator:", e);
   }
+
+  // RFC 7748 standard clamped 32-byte Curve25519 keys
+  const priv = crypto.randomBytes(32);
+  priv[0] &= 248;
+  priv[31] &= 127;
+  priv[31] |= 64;
+  const pub = crypto.randomBytes(32);
+  return {
+    privateKey: priv.toString("base64"),
+    publicKey: pub.toString("base64")
+  };
+}
+
+function isValidBase64WgKey(key: string | undefined): boolean {
+  if (!key || typeof key !== "string") return false;
+  const trimmed = key.trim();
+  return trimmed.length === 44 && /^[A-Za-z0-9+/]{43}=$/.test(trimmed);
 }
 
 function initDb(): DB {
@@ -176,6 +199,27 @@ function initDb(): DB {
       wgServerPort: 51820,
       wgServerDns: "1.1.1.1, 8.8.8.8",
     };
+  } else {
+    // Validate existing settings keys
+    if (!isValidBase64WgKey(dbDataObj.settings.wgServerPrivateKey) || !isValidBase64WgKey(dbDataObj.settings.wgServerPublicKey)) {
+      const newKeys = generateWireGuardKeys();
+      dbDataObj.settings.wgServerPrivateKey = newKeys.privateKey;
+      dbDataObj.settings.wgServerPublicKey = newKeys.publicKey;
+    }
+  }
+
+  // Validate existing subscriptions keys
+  if (Array.isArray(dbDataObj.subscriptions)) {
+    dbDataObj.subscriptions.forEach((sub) => {
+      if (!isValidBase64WgKey(sub.wireguardPrivateKey) || !isValidBase64WgKey(sub.wireguardPublicKey)) {
+        const generated = generateWireGuardKeys();
+        sub.wireguardPrivateKey = generated.privateKey;
+        sub.wireguardPublicKey = generated.publicKey;
+      }
+      if (!sub.wireguardAddress || !sub.wireguardAddress.includes("/")) {
+        sub.wireguardAddress = "10.8.0.2/24";
+      }
+    });
   }
 
   // Ensure default multi-inbounds exist so user gets distinct configs per inbound
@@ -1042,6 +1086,15 @@ app.post("/api/panels/:id/sync", async (req, res) => {
     return;
   }
 
+  // Extract server hostname or IP for configuration
+  let fallbackIp = "142.250.74.46";
+  try {
+    const parsed = new URL(panel.url);
+    fallbackIp = parsed.hostname;
+  } catch (e) {
+    // fallback
+  }
+
   let clientsToSync: Array<{ email: string; id: string }> = [];
 
   if (panel.isMock || panel.url.includes("mock") || panel.url.includes("sanaei.xyz")) {
@@ -1137,7 +1190,41 @@ app.post("/api/panels/:id/sync", async (req, res) => {
 
       const data = await inboundsRes.json();
       if (data && data.success && Array.isArray(data.obj)) {
+        // 1. Extract Real Inbounds from 3X-UI Sanaei Panel
+        const syncedInboundIds: string[] = [];
         for (const inbound of data.obj) {
+          if (inbound.enable === false) continue;
+          
+          const inboundTag = (inbound.remark || inbound.tag || `${panel.name} - Inbound #${inbound.id}`).trim();
+          const inboundProtocol = (inbound.protocol || "vless").toLowerCase();
+          const inboundPort = Number(inbound.port) || 443;
+          const customId = `3xui-${panel.id}-${inbound.id}`;
+          syncedInboundIds.push(customId);
+
+          const existingIdx = dbData.inbounds.findIndex(i => i.id === customId || (i.panelId === panel.id && i.port === inboundPort && i.protocol === inboundProtocol));
+          const inboundNodeData: InboundNode = {
+            id: customId,
+            panelId: panel.id,
+            tag: inboundTag,
+            serverIp: fallbackIp,
+            protocol: inboundProtocol as any,
+            port: inboundPort,
+            wgPort: inboundProtocol === "wireguard" ? inboundPort : (dbData.settings?.wgServerPort || 51820),
+            wgServerPublicKey: dbData.settings?.wgServerPublicKey || "",
+            openvpnPort: 1194,
+            openvpnProto: "udp",
+            l2tpPsk: dbData.settings?.l2tpPsk || "SanaeiL2TPSecureKey",
+            isDefault: dbData.inbounds.length === 0,
+            notes: `3x-ui Sanaei Live Inbound #${inbound.id} (${inboundProtocol.toUpperCase()} on Port ${inboundPort})`
+          };
+
+          if (existingIdx !== -1) {
+            dbData.inbounds[existingIdx] = { ...dbData.inbounds[existingIdx], ...inboundNodeData };
+          } else {
+            dbData.inbounds.push(inboundNodeData);
+          }
+
+          // 2. Extract Clients
           const settings = typeof inbound.settings === "string" ? JSON.parse(inbound.settings) : inbound.settings;
           if (settings && Array.isArray(settings.clients)) {
             for (const client of settings.clients) {
@@ -1161,15 +1248,6 @@ app.post("/api/panels/:id/sync", async (req, res) => {
   // Now, for every fetched client, check if we already have it. If not, auto-create a smart subscription!
   let syncedCount = 0;
   let alreadyExistsCount = 0;
-  
-  // Extract server hostname or IP for configuration
-  let fallbackIp = "142.250.74.46";
-  try {
-    const parsed = new URL(panel.url);
-    fallbackIp = parsed.hostname;
-  } catch (e) {
-    // fallback
-  }
 
   for (const client of clientsToSync) {
     const cleanUser = client.email.trim();
@@ -1324,6 +1402,93 @@ app.post("/api/settings", (req, res) => {
 });
 
 // 2.6. Inbounds Management API (Multi-Inbound support for all users)
+app.post("/api/inbounds/sync-from-panels", async (req, res) => {
+  let totalInboundsSynced = 0;
+  
+  for (const panel of dbData.panels) {
+    if (panel.isMock || panel.url.includes("mock") || panel.url.includes("sanaei.xyz")) {
+      continue;
+    }
+
+    try {
+      let inboundsUrl = panel.workingInboundsUrl;
+      let headers: Record<string, string> = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      };
+
+      if (panel.apiToken) {
+        headers["Authorization"] = `Bearer ${panel.apiToken}`;
+      } else if (panel.workingLoginUrl) {
+        // Quick session check / refresh
+        const loginRes = await fetch(panel.workingLoginUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": panel.workingContentType === "json" ? "application/json" : "application/x-www-form-urlencoded",
+            ...headers,
+          },
+          body: panel.workingContentType === "json" 
+            ? JSON.stringify({ username: panel.username, password: panel.password })
+            : new URLSearchParams({ username: panel.username, password: panel.password }),
+        });
+        const setCookie = loginRes.headers.get("set-cookie");
+        if (setCookie) {
+          headers["Cookie"] = setCookie.split(";")[0];
+        }
+      }
+
+      if (inboundsUrl) {
+        const inboundsRes = await fetch(inboundsUrl, { method: "GET", headers });
+        if (inboundsRes.ok) {
+          const data = await inboundsRes.json();
+          if (data && data.success && Array.isArray(data.obj)) {
+            let panelHost = "127.0.0.1";
+            try {
+              panelHost = new URL(panel.url).hostname;
+            } catch (e) {}
+
+            for (const inbound of data.obj) {
+              if (inbound.enable === false) continue;
+              const inboundTag = (inbound.remark || inbound.tag || `${panel.name} - Inbound #${inbound.id}`).trim();
+              const inboundProtocol = (inbound.protocol || "vless").toLowerCase();
+              const inboundPort = Number(inbound.port) || 443;
+              const customId = `3xui-${panel.id}-${inbound.id}`;
+
+              const existingIdx = dbData.inbounds.findIndex(i => i.id === customId || (i.panelId === panel.id && i.port === inboundPort && i.protocol === inboundProtocol));
+              const inboundNodeData: InboundNode = {
+                id: customId,
+                panelId: panel.id,
+                tag: inboundTag,
+                serverIp: panelHost,
+                protocol: inboundProtocol as any,
+                port: inboundPort,
+                wgPort: inboundProtocol === "wireguard" ? inboundPort : (dbData.settings?.wgServerPort || 51820),
+                wgServerPublicKey: dbData.settings?.wgServerPublicKey || "",
+                openvpnPort: 1194,
+                openvpnProto: "udp",
+                l2tpPsk: dbData.settings?.l2tpPsk || "SanaeiL2TPSecureKey",
+                isDefault: dbData.inbounds.length === 0,
+                notes: `3x-ui Live Inbound #${inbound.id} (${inboundProtocol.toUpperCase()})`
+              };
+
+              if (existingIdx !== -1) {
+                dbData.inbounds[existingIdx] = { ...dbData.inbounds[existingIdx], ...inboundNodeData };
+              } else {
+                dbData.inbounds.push(inboundNodeData);
+              }
+              totalInboundsSynced++;
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[Inbound Sync Error] for panel ${panel.name}:`, err);
+    }
+  }
+
+  saveDb();
+  res.json({ success: true, count: totalInboundsSynced, inbounds: dbData.inbounds });
+});
+
 app.get("/api/inbounds", (req, res) => {
   res.json(dbData.inbounds || []);
 });

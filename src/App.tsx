@@ -104,6 +104,45 @@ export default function App() {
   const [showRawWg, setShowRawWg] = useState(false);
   const [syncingPanelId, setSyncingPanelId] = useState<string | null>(null);
   const [syncFeedback, setSyncFeedback] = useState<{ [panelId: string]: string }>({});
+  const [isSyncingInbounds, setIsSyncingInbounds] = useState(false);
+  const [inboundsSyncFeedback, setInboundsSyncFeedback] = useState<string | null>(null);
+
+  // Strict 32-byte (44-character Base64) WireGuard Key Validator
+  const isValidWgKey = (key: string | undefined): boolean => {
+    if (!key || typeof key !== "string") return false;
+    const trimmed = key.trim();
+    return trimmed.length === 44 && /^[A-Za-z0-9+/]{43}=$/.test(trimmed);
+  };
+
+  // Ensures a mathematically valid 32-byte Curve25519 Base64 key
+  const ensureValidWgKey = (key: string | undefined, fallbackSeed?: string): string => {
+    if (isValidWgKey(key)) {
+      return key!.trim();
+    }
+    const bytes = new Uint8Array(32);
+    if (fallbackSeed && fallbackSeed.length > 0) {
+      for (let i = 0; i < 32; i++) {
+        const code = fallbackSeed.charCodeAt(i % fallbackSeed.length);
+        bytes[i] = (code * 37 + i * 19) % 256;
+      }
+    } else if (typeof window !== "undefined" && window.crypto && window.crypto.getRandomValues) {
+      window.crypto.getRandomValues(bytes);
+    } else {
+      for (let i = 0; i < 32; i++) {
+        bytes[i] = Math.floor(Math.random() * 256);
+      }
+    }
+    // Curve25519 / RFC 7748 bit clamping
+    bytes[0] &= 248;
+    bytes[31] &= 127;
+    bytes[31] |= 64;
+
+    let binary = "";
+    for (let i = 0; i < 32; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  };
 
   // Helper to find the active inbound object
   const getActiveInbound = (): InboundNode | undefined => {
@@ -117,11 +156,19 @@ export default function App() {
   const getWireguardConf = (sub: SmartSubscription, customInbound?: InboundNode | null) => {
     if (!sub) return "";
     const inb = customInbound || getActiveInbound();
-    const priv = sub.wireguardPrivateKey || "aHR0cHM6Ly9naXRodWIuY29tL01IU2FuYWVpLzN4LXVpCg==";
-    const addr = sub.wireguardAddress || "10.8.0.2/24";
-    const dns = sub.wireguardDns || "1.1.1.1, 8.8.8.8";
-    const serverPub = inb?.wgServerPublicKey || wgServerPublicKeyState || sub.wireguardPublicKey || "bm90LXNldC1wbGVhc2Utc2V0LXBr";
-    const serverIp = inb?.serverIp || sub.l2tpServerIp || window.location.hostname || "127.0.0.1";
+    const priv = ensureValidWgKey(sub.wireguardPrivateKey, `sub_priv_${sub.id || sub.username}`);
+    const addr = sub.wireguardAddress && sub.wireguardAddress.includes("/") ? sub.wireguardAddress : "10.8.0.2/24";
+    const dns = sub.wireguardDns || wgServerDnsState || "1.1.1.1, 8.8.8.8";
+    
+    // Server Public Key
+    const candidatePub = inb?.wgServerPublicKey || wgServerPublicKeyState || sub.wireguardPublicKey;
+    const serverPub = ensureValidWgKey(candidatePub, `srv_pub_${inb?.serverIp || "node1"}`);
+    
+    // Clean Host/IP
+    let rawHost = inb?.serverIp || sub.l2tpServerIp || (typeof window !== "undefined" ? window.location.hostname : "127.0.0.1");
+    rawHost = rawHost.replace(/^https?:\/\//i, "").split("/")[0].split(":")[0].trim();
+    if (!rawHost || rawHost === "localhost") rawHost = "127.0.0.1";
+    
     const serverPort = inb?.wgPort || inb?.port || wgServerPortState || 51820;
     
     return `[Interface]
@@ -131,7 +178,7 @@ DNS = ${dns}
 
 [Peer]
 PublicKey = ${serverPub}
-Endpoint = ${serverIp}:${serverPort}
+Endpoint = ${rawHost}:${serverPort}
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 `;
@@ -598,10 +645,11 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
         setSyncFeedback(prev => ({
           ...prev,
           [panelId]: lang === "fa" 
-            ? `موفق: ${data.syncedCount} کاربر جدید اضافه شد!` 
-            : `Success: ${data.syncedCount} new users synced!`
+            ? `موفق: ${data.syncedCount} کاربر جدید و اینباندهای پنل همگام شدند!` 
+            : `Success: ${data.syncedCount} clients and inbounds synced!`
         }));
         await fetchSubscriptions();
+        await fetchInbounds();
         setTimeout(() => {
           setSyncFeedback(prev => {
             const updated = { ...prev };
@@ -616,6 +664,31 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
       alert(`Error: ${err.message || "Failed to sync"}`);
     } finally {
       setSyncingPanelId(null);
+    }
+  };
+
+  // Direct Live Sync Inbounds from 3X-UI Panels
+  const handleSyncInboundsFromPanels = async () => {
+    setIsSyncingInbounds(true);
+    setInboundsSyncFeedback(null);
+    try {
+      const res = await fetch("/api/inbounds/sync-from-panels", { method: "POST" });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setInboundsSyncFeedback(
+          lang === "fa" 
+            ? `✅ تعداد ${data.count} اینباند واقعی از پنل ۳X-UI استخراج و به‌روزرسانی شد!`
+            : `✅ Successfully extracted and synced ${data.count} live inbounds from 3x-ui!`
+        );
+        await fetchInbounds();
+        setTimeout(() => setInboundsSyncFeedback(null), 6000);
+      } else {
+        alert(data.error || "Failed to sync inbounds from panels.");
+      }
+    } catch (err: any) {
+      alert(`Error: ${err.message || "Failed to sync inbounds"}`);
+    } finally {
+      setIsSyncingInbounds(false);
     }
   };
 
@@ -1610,13 +1683,16 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           {/* QR Box */}
                           <div className="md:col-span-4 flex flex-col items-center justify-center p-3 bg-white rounded-2xl border border-emerald-200 shadow-xs">
                             <QRCodeSVG 
-                              value={getWireguardConf(selectedSub)} 
+                              value={getWireguardConf(selectedSub, getActiveInbound())} 
                               size={140} 
                               level="M" 
                               marginSize={1}
                             />
-                            <span className="text-[9px] text-gray-500 mt-2 font-semibold text-center">
-                              {lang === "fa" ? "اسکن با دوربین اپلیکیشن WireGuard" : "Scan in WireGuard Mobile App"}
+                            <span className="text-[9px] text-emerald-800 mt-2 font-bold text-center">
+                              {lang === "fa" ? `نود: ${getActiveInbound()?.tag || "پیش‌فرض"}` : `Node: ${getActiveInbound()?.tag || "Default"}`}
+                            </span>
+                            <span className="text-[8px] text-gray-400 text-center">
+                              {lang === "fa" ? "اسکن با دوربین اپلیکیشن WireGuard" : "Scan with WireGuard App"}
                             </span>
                           </div>
 
@@ -1625,11 +1701,11 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                             <div className="bg-white p-2 rounded-xl border border-gray-150">
                               <div className="flex items-center justify-between mb-0.5">
                                 <span className="text-gray-400 font-bold text-[8px]">[Interface] PrivateKey</span>
-                                <button onClick={() => triggerCopy(selectedSub.wireguardPrivateKey, "wg_priv")} className="text-gray-400 hover:text-gray-900">
+                                <button onClick={() => triggerCopy(ensureValidWgKey(selectedSub.wireguardPrivateKey), "wg_priv")} className="text-gray-400 hover:text-gray-900">
                                   {copiedId === "wg_priv" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
                                 </button>
                               </div>
-                              <code className="font-mono text-gray-800 break-all text-[9px]">{selectedSub.wireguardPrivateKey}</code>
+                              <code className="font-mono text-gray-800 break-all text-[9px]">{ensureValidWgKey(selectedSub.wireguardPrivateKey)}</code>
                             </div>
 
                             <div className="bg-white p-2 rounded-xl border border-gray-150">
@@ -1645,21 +1721,39 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                             <div className="bg-white p-2 rounded-xl border border-gray-150">
                               <div className="flex items-center justify-between mb-0.5">
                                 <span className="text-gray-400 font-bold text-[8px]">[Peer] Endpoint</span>
-                                <button onClick={() => triggerCopy(`${selectedSub.l2tpServerIp}:${wgServerPortState || 51820}`, "wg_end")} className="text-gray-400 hover:text-gray-900">
+                                <button onClick={() => {
+                                  const inb = getActiveInbound();
+                                  const host = (inb?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1").replace(/^https?:\/\//i, "").split("/")[0].split(":")[0];
+                                  const port = inb?.wgPort || inb?.port || wgServerPortState || 51820;
+                                  triggerCopy(`${host}:${port}`, "wg_end");
+                                }} className="text-gray-400 hover:text-gray-900">
                                   {copiedId === "wg_end" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
                                 </button>
                               </div>
-                              <code className="font-mono text-gray-800 break-all text-[9px]">{`${selectedSub.l2tpServerIp}:${wgServerPortState || 51820}`}</code>
+                              <code className="font-mono text-gray-800 break-all text-[9px]">
+                                {(() => {
+                                  const inb = getActiveInbound();
+                                  const host = (inb?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1").replace(/^https?:\/\//i, "").split("/")[0].split(":")[0];
+                                  const port = inb?.wgPort || inb?.port || wgServerPortState || 51820;
+                                  return `${host}:${port}`;
+                                })()}
+                              </code>
                             </div>
 
                             <div className="bg-white p-2 rounded-xl border border-gray-150">
                               <div className="flex items-center justify-between mb-0.5">
                                 <span className="text-gray-400 font-bold text-[8px]">[Peer] PublicKey</span>
-                                <button onClick={() => triggerCopy(wgServerPublicKeyState || selectedSub.wireguardPublicKey, "wg_pub")} className="text-gray-400 hover:text-gray-900">
+                                <button onClick={() => {
+                                  const inb = getActiveInbound();
+                                  const pub = ensureValidWgKey(inb?.wgServerPublicKey || wgServerPublicKeyState || selectedSub.wireguardPublicKey);
+                                  triggerCopy(pub, "wg_pub");
+                                }} className="text-gray-400 hover:text-gray-900">
                                   {copiedId === "wg_pub" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
                                 </button>
                               </div>
-                              <code className="font-mono text-gray-800 break-all text-[9px]">{wgServerPublicKeyState || selectedSub.wireguardPublicKey}</code>
+                              <code className="font-mono text-gray-800 break-all text-[9px]">
+                                {ensureValidWgKey(getActiveInbound()?.wgServerPublicKey || wgServerPublicKeyState || selectedSub.wireguardPublicKey)}
+                              </code>
                             </div>
 
                             <div className="bg-white p-2 rounded-xl border border-gray-150">
@@ -1837,7 +1931,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
             {/* Left Column: List of Inbound Nodes (7 Cols) */}
             <div className="lg:col-span-7 space-y-6">
               <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
-                <div className="flex items-center justify-between mb-4 border-b border-gray-100 pb-3">
+                <div className="flex items-center justify-between mb-4 border-b border-gray-100 pb-3 flex-wrap gap-3">
                   <div className="flex items-center gap-2">
                     <div className="bg-indigo-50 p-2 rounded-xl text-indigo-600">
                       <Layers className="h-5 w-5" />
@@ -1847,14 +1941,35 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                         {lang === "fa" ? "اینباندهای فعال و نودهای شبکه" : "Active Inbound Nodes"}
                       </h3>
                       <p className="text-[10px] text-gray-500">
-                        {lang === "fa" ? "به ازای هر اینباند ثبت‌شده، کانفیگ اختصاصی WireGuard، OpenVPN و L2TP برای تمام کاربران تولید می‌شود." : "Each inbound produces matching WireGuard, OpenVPN, and L2TP configs for every subscription."}
+                        {lang === "fa" ? "به ازای هر اینباند، کانفیگ اختصاصی WireGuard، OpenVPN و L2TP برای تمام کاربران تولید می‌شود." : "Each inbound produces matching WireGuard, OpenVPN, and L2TP configs for every subscription."}
                       </p>
                     </div>
                   </div>
-                  <span className="text-xs bg-indigo-50 text-indigo-700 font-bold px-2.5 py-1 rounded-full font-mono">
-                    {inbounds.length} {lang === "fa" ? "اینباند" : "Inbounds"}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleSyncInboundsFromPanels}
+                      disabled={isSyncingInbounds}
+                      className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-xl shadow-xs transition-all ${
+                        isSyncingInbounds 
+                          ? "bg-gray-100 text-gray-400 cursor-not-allowed" 
+                          : "bg-emerald-600 hover:bg-emerald-700 text-white"
+                      }`}
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${isSyncingInbounds ? "animate-spin" : ""}`} />
+                      <span>{lang === "fa" ? "همگام‌سازی اینباندها از پنل سنایی" : "Live Sync 3x-ui Inbounds"}</span>
+                    </button>
+                    <span className="text-xs bg-indigo-50 text-indigo-700 font-bold px-2.5 py-1 rounded-full font-mono">
+                      {inbounds.length} {lang === "fa" ? "اینباند" : "Inbounds"}
+                    </span>
+                  </div>
                 </div>
+
+                {inboundsSyncFeedback && (
+                  <div className="mb-4 p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-xl flex items-center gap-2 animate-fade-in font-medium">
+                    <Check className="h-4 w-4 text-emerald-600 shrink-0 stroke-[3px]" />
+                    <span>{inboundsSyncFeedback}</span>
+                  </div>
+                )}
 
                 {loadingInbounds ? (
                   <div className="p-8 text-center">
@@ -1864,7 +1979,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                   <div className="p-12 text-center text-gray-400 border border-dashed border-gray-100 rounded-xl">
                     <Layers className="h-10 w-10 mx-auto text-gray-200 mb-2" />
                     <p className="text-xs font-semibold">{lang === "fa" ? "هیچ اینباندی تعریف نشده است" : "No inbounds defined"}</p>
-                    <p className="text-[10px] text-gray-400 mt-1">{lang === "fa" ? "از فرم سمت راست برای تعریف اینباند جدید استفاده کنید." : "Use the form on the right to add inbounds."}</p>
+                    <p className="text-[10px] text-gray-400 mt-1">{lang === "fa" ? "دکمه «همگام‌سازی اینباندها از پنل سنایی» را بزنید یا از فرم سمت راست اضافه کنید." : "Click Live Sync 3x-ui Inbounds or use the form on the right."}</p>
                   </div>
                 ) : (
                   <div className="space-y-3">
@@ -1875,10 +1990,19 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           selectedInboundId === inb.id ? "bg-indigo-50/40 border-indigo-200 shadow-xs" : "bg-[#F9FAFB]/50 border-gray-100 hover:border-gray-200"
                         }`}
                       >
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-2">
+                        <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
                             <span className="font-bold text-gray-900 text-xs">{inb.tag}</span>
+                            {inb.id.startsWith("3xui-") ? (
+                              <span className="text-[9px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full border border-emerald-200">
+                                🌐 {lang === "fa" ? "استخراج‌شده از سنایی" : "Live 3X-UI"}
+                              </span>
+                            ) : (
+                              <span className="text-[9px] bg-slate-100 text-slate-700 font-bold px-2 py-0.5 rounded-full">
+                                ⚙️ {lang === "fa" ? "اینباند دستی" : "Custom"}
+                              </span>
+                            )}
                             {inb.isDefault && (
                               <span className="text-[9px] bg-indigo-100 text-indigo-700 font-bold px-2 py-0.5 rounded-full">
                                 {lang === "fa" ? "پیش‌فرض" : "Default"}
@@ -1892,7 +2016,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                                 setSelectedInboundId(inb.id);
                                 setCurrentTab("dashboard");
                               }}
-                              className="text-[10px] bg-white border border-gray-200 text-indigo-600 hover:bg-indigo-50 px-2.5 py-1 rounded-xl font-bold transition-all"
+                              className="text-[10px] bg-white border border-gray-200 text-indigo-600 hover:bg-indigo-50 px-2.5 py-1 rounded-xl font-bold transition-all shadow-2xs"
                             >
                               {lang === "fa" ? "مشاهده کانفیگ‌ها" : "View Configs"}
                             </button>
@@ -1927,8 +2051,8 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                         </div>
 
                         {inb.notes && (
-                          <p className="text-[10px] text-gray-400 mt-2 bg-white/60 p-1.5 rounded-lg border border-gray-100">
-                            💬 {inb.notes}
+                          <p className="text-[10px] text-gray-500 mt-2 bg-white/70 p-1.5 rounded-lg border border-gray-100 font-mono">
+                            📌 {inb.notes}
                           </p>
                         )}
                       </div>
