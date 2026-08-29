@@ -75,6 +75,12 @@ install_service() {
 
   echo -e "${BLUE}[5/5] Creating Systemd service for auto-start...${NC}"
   
+  # Prompt user for custom port selection
+  read -p "Please enter the port you want this panel to run on [Default: 3000]: " CUSTOM_PORT
+  if [ -z "$CUSTOM_PORT" ]; then
+    CUSTOM_PORT="3000"
+  fi
+
   cat <<EOF >/etc/systemd/system/${SERVICE_NAME}.service
 [Unit]
 Description=Sanaei 3x-ui Smart L2TP Companion Panel
@@ -87,6 +93,7 @@ WorkingDirectory=${INSTALL_DIR}
 ExecStart=$(command -v npm) start
 Restart=on-failure
 Environment=NODE_ENV=production
+Environment=PORT=${CUSTOM_PORT}
 
 [Install]
 WantedBy=multi-user.target
@@ -98,8 +105,8 @@ EOF
 
   echo -e "${GREEN}==========================================================${NC}"
   echo -e "${GREEN}  Installation completed successfully!${NC}"
-  echo -e "${GREEN}  Service is running on port 3000.${NC}"
-  echo -e "${GREEN}  You can access it at: http://$(curl -s ipv4.icanhazip.com):3000${NC}"
+  echo -e "${GREEN}  Service is running on port ${CUSTOM_PORT}.${NC}"
+  echo -e "${GREEN}  You can access it at: http://\$(curl -s ipv4.icanhazip.com):${CUSTOM_PORT}${NC}"
   echo -e "${GREEN}==========================================================${NC}"
 }
 
