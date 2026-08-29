@@ -1531,7 +1531,7 @@ app.get("/api/sub/:token", async (req, res) => {
 
 // 5. Windows PBK L2TP configuration profile download
 app.get("/api/sub/:token/l2tp-pbk", (req, res) => {
-  const sub = dbData.subscriptions.find((s) => s.id === req.params.token);
+  const sub = dbData.subscriptions.find((s) => s.id === req.params.token || s.username === req.params.token);
   if (!sub) {
     res.status(404).send("Subscription not found");
     return;
@@ -1551,14 +1551,15 @@ CustomDialDll=
 CustomDialFunc=
 `;
 
-  res.setHeader("Content-Type", "application/octet-stream");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="L2TP_${sub.username}.pbk"`);
   res.send(pbkString);
 });
 
 // 6. Apple iOS/macOS .mobileconfig profile download
 app.get("/api/sub/:token/l2tp-mobileconfig", (req, res) => {
-  const sub = dbData.subscriptions.find((s) => s.id === req.params.token);
+  const sub = dbData.subscriptions.find((s) => s.id === req.params.token || s.username === req.params.token);
   if (!sub) {
     res.status(404).send("Subscription not found");
     return;
@@ -1627,14 +1628,15 @@ app.get("/api/sub/:token/l2tp-mobileconfig", (req, res) => {
 </dict>
 </plist>`;
 
-  res.setHeader("Content-Type", "application/x-apple-aspen-config");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Content-Type", "application/x-apple-aspen-config; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="L2TP_${sub.username}.mobileconfig"`);
   res.send(mobileconfig);
 });
 
 // 7. WireGuard profile download (.conf)
 app.get("/api/sub/:token/wireguard-conf", (req, res) => {
-  const sub = dbData.subscriptions.find((s) => s.id === req.params.token);
+  const sub = dbData.subscriptions.find((s) => s.id === req.params.token || s.username === req.params.token);
   if (!sub) {
     res.status(404).send("Subscription not found");
     return;
@@ -1655,14 +1657,15 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 `;
 
-  res.setHeader("Content-Type", "application/octet-stream");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
   res.setHeader("Content-Disposition", `attachment; filename="WireGuard_${sub.username}.conf"`);
   res.send(wgConf);
 });
 
 // 8. OpenVPN profile download (.ovpn)
 app.get("/api/sub/:token/openvpn-ovpn", (req, res) => {
-  const sub = dbData.subscriptions.find((s) => s.id === req.params.token);
+  const sub = dbData.subscriptions.find((s) => s.id === req.params.token || s.username === req.params.token);
   if (!sub) {
     res.status(404).send("Subscription not found");
     return;

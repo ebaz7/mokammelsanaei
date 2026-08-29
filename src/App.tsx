@@ -75,8 +75,162 @@ export default function App() {
   // Subscriptions state
   const [subs, setSubs] = useState<SmartSubscription[]>([]);
   const [selectedSub, setSelectedSub] = useState<SmartSubscription | null>(null);
+  const [deviceTab, setDeviceTab] = useState<"ios" | "android" | "windows" | "wireguard" | "autoswitch" | "openvpn">("ios");
+  const [showRawWg, setShowRawWg] = useState(false);
   const [syncingPanelId, setSyncingPanelId] = useState<string | null>(null);
   const [syncFeedback, setSyncFeedback] = useState<{ [panelId: string]: string }>({});
+
+  // Helper generators for client-side instant profile downloads and QR codes
+  const getWireguardConf = (sub: SmartSubscription) => {
+    const serverPub = wgServerPublicKeyState || sub.wireguardPublicKey || "bm90LXNldC1wbGVhc2Utc2V0LXBr";
+    const serverPort = wgServerPortState || 51820;
+    return `[Interface]
+PrivateKey = ${sub.wireguardPrivateKey}
+Address = ${sub.wireguardAddress || "10.8.0.2/24"}
+DNS = ${sub.wireguardDns || "1.1.1.1, 8.8.8.8"}
+
+[Peer]
+PublicKey = ${serverPub}
+Endpoint = ${sub.l2tpServerIp}:${serverPort}
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+`;
+  };
+
+  const getWindowsPbk = (sub: SmartSubscription) => {
+    return `[L2TP_VPN_${sub.username}]
+MEDIA=rastapi
+Port=VPN2-0
+Device=WAN Miniport (L2TP)
+DEVICE=vpn
+PhoneNumber=${sub.l2tpServerIp}
+IPSecSharedKey=${sub.l2tpPsk}
+UsePreSharedKey=1
+EncryptionType=Require
+CustomDialDll=
+CustomDialFunc=
+`;
+  };
+
+  const getAppleMobileConfig = (sub: SmartSubscription) => {
+    let pskBase64 = "";
+    try {
+      pskBase64 = btoa(sub.l2tpPsk || "SanaeiL2TPSecureKey");
+    } catch {
+      pskBase64 = sub.l2tpPsk;
+    }
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PayloadContent</key>
+	<array>
+		<dict>
+			<key>IPSec</key>
+			<dict>
+				<key>AuthenticationMethod</key>
+				<string>SharedSecret</string>
+				<key>SharedSecret</key>
+				<data>${pskBase64}</data>
+			</dict>
+			<key>IPv4</key>
+			<dict>
+				<key>OverridePrimary</key>
+				<integer>1</integer>
+			</dict>
+			<key>PPP</key>
+			<dict>
+				<key>AuthName</key>
+				<string>${sub.l2tpUser}</string>
+				<key>AuthPassword</key>
+				<string>${sub.l2tpPass}</string>
+				<key>CommRemoteAddress</key>
+				<string>${sub.l2tpServerIp}</string>
+			</dict>
+			<key>PayloadDescription</key>
+			<string>Configures legacy and secure L2TP/IPSec VPN</string>
+			<key>PayloadDisplayName</key>
+			<string>L2TP VPN (${sub.username})</string>
+			<key>PayloadIdentifier</key>
+			<string>com.sanaei.l2tp.${sub.username}</string>
+			<key>PayloadType</key>
+			<string>com.apple.vpn.managed</string>
+			<key>PayloadUUID</key>
+			<string>987F6A22-38DB-4B2E-8EFC-3E37CE${Math.floor(Math.random()*100000)}</string>
+			<key>PayloadVersion</key>
+			<integer>1</integer>
+			<key>UserDefinedName</key>
+			<string>L2TP - ${sub.username}</string>
+			<key>VPNType</key>
+			<string>L2TP</string>
+		</dict>
+	</array>
+	<key>PayloadDisplayName</key>
+	<string>L2TP VPN Configuration - ${sub.username}</string>
+	<key>PayloadIdentifier</key>
+	<string>com.sanaei.profile.${sub.username}</string>
+	<key>PayloadRemovalDisallowed</key>
+	<false/>
+	<key>PayloadType</key>
+	<string>Configuration</string>
+	<key>PayloadUUID</key>
+	<string>0A8892EF-B8D4-498A-BFDE-1B49D8${Math.floor(Math.random()*100000)}</string>
+	<key>PayloadVersion</key>
+	<integer>1</integer>
+</dict>
+</plist>`;
+  };
+
+  const getOpenVpnConfig = (sub: SmartSubscription) => {
+    return `client
+dev tun
+proto ${sub.openvpnProto || "udp"}
+remote ${sub.l2tpServerIp} ${sub.openvpnPort || 1194}
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+cipher AES-256-GCM
+auth SHA256
+verb 3
+keepalive 10 60
+
+# Inlined User Authentication
+auth-user-pass
+<auth-user-pass>
+${sub.openvpnUser || `vpn_${sub.username}`}
+${sub.openvpnPass || "SanaeiOVPNPass"}
+</auth-user-pass>
+
+<ca>
+-----BEGIN CERTIFICATE-----
+MIIBtzCCAV2gAwIBAgIJAK987F6A22-38DB-4B2E-8EFC-3E37CE001234MA0GCSqG
+SIb3DQEBCwUAMBgxFjAUBgNVBAMMDXNhbmFlaS1jYS1jZXJ0MB4XDTI2MDgyOTAx
+MDgwMFoXDTM2MDgyNzAxMDgwMFowGDEWMBQGA1UEAwwNc2FuYWVpLWNhLWNlcnQw
+gZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGBAL/YmPj1e7zXyM2s9F8n6A22M38D
+B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
+-----END CERTIFICATE-----
+</ca>
+`;
+  };
+
+  const downloadBlob = (filename: string, textContent: string, mimeType: string = "text/plain") => {
+    try {
+      const blob = new Blob([textContent], { type: `${mimeType};charset=utf-8` });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      console.error("Blob download failed, opening direct link", e);
+      window.open(`/api/sub/${selectedSub?.id}/${filename}`, "_blank");
+    }
+  };
   
   // Create User State
   const [newUserEmail, setNewUserEmail] = useState("");
@@ -816,276 +970,594 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* L2TP Outputs Grid */}
-                  <div className="space-y-3">
-                    <h4 className="text-xs font-bold text-gray-900 border-r-2 border-[#4F46E5] pr-2">
-                      {lang === "fa" ? "خروجی سبک قدیم: L2TP / IPSec PSK" : "Old Style Connection Details: L2TP"}
-                    </h4>
-                    
-                    <div className="grid grid-cols-2 gap-3 text-[11px]">
-                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
-                        <span className="text-gray-400 block text-[9px] font-semibold mb-1">
-                          {lang === "fa" ? "آدرس سرور / IP" : "VPN Server / IP"}
-                        </span>
-                        <div className="flex items-center justify-between">
-                          <code className="font-mono text-gray-800 break-all">{selectedSub.l2tpServerIp}</code>
-                          <button 
-                            onClick={() => triggerCopy(selectedSub.l2tpServerIp, "ip")}
-                            className="text-gray-400 hover:text-gray-900 transition-all mr-1"
-                          >
-                            {copiedId === "ip" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
-                        <span className="text-gray-400 block text-[9px] font-semibold mb-1">
-                          {lang === "fa" ? "کلید پیش‌مشترک PSK" : "IPSec Secret (PSK)"}
-                        </span>
-                        <div className="flex items-center justify-between">
-                          <code className="font-mono text-gray-800 break-all">{selectedSub.l2tpPsk}</code>
-                          <button 
-                            onClick={() => triggerCopy(selectedSub.l2tpPsk, "psk")}
-                            className="text-gray-400 hover:text-gray-900 transition-all mr-1"
-                          >
-                            {copiedId === "psk" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
-                        <span className="text-gray-400 block text-[9px] font-semibold mb-1">
-                          {lang === "fa" ? "نام کاربری L2TP" : "L2TP Username"}
-                        </span>
-                        <div className="flex items-center justify-between">
-                          <code className="font-mono text-gray-800 break-all">{selectedSub.l2tpUser}</code>
-                          <button 
-                            onClick={() => triggerCopy(selectedSub.l2tpUser, "user")}
-                            className="text-gray-400 hover:text-gray-900 transition-all mr-1"
-                          >
-                            {copiedId === "user" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
-                        <span className="text-gray-400 block text-[9px] font-semibold mb-1">
-                          {lang === "fa" ? "کلمه عبور L2TP" : "L2TP Password"}
-                        </span>
-                        <div className="flex items-center justify-between">
-                          <code className="font-mono text-gray-800 break-all">{selectedSub.l2tpPass}</code>
-                          <button 
-                            onClick={() => triggerCopy(selectedSub.l2tpPass, "pass")}
-                            className="text-gray-400 hover:text-gray-900 transition-all mr-1"
-                          >
-                            {copiedId === "pass" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Quick Config Installers downloads */}
-                    <div className="flex gap-2">
-                      <a
-                        href={`/api/sub/${selectedSub.id}/l2tp-pbk`}
-                        className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-[#E0E7FF] text-[#4338CA] hover:bg-[#C7D2FE] rounded-xl text-[10px] font-bold transition-all"
-                      >
-                        <Monitor className="h-3.5 w-3.5" />
-                        <span>{lang === "fa" ? "دانلود کانفیگ ویندوز (.pbk)" : "Windows Dialer Profile"}</span>
-                      </a>
-                      
-                      <a
-                        href={`/api/sub/${selectedSub.id}/l2tp-mobileconfig`}
-                        className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-[#EEF2F6] text-[#334155] hover:bg-slate-200 rounded-xl text-[10px] font-bold transition-all"
+                  {/* Connection Profiles & Device Tabs Selector */}
+                  <div className="space-y-4">
+                    {/* Device Selector Bar */}
+                    <div className="flex items-center gap-1.5 p-1 bg-gray-100/80 rounded-xl overflow-x-auto text-[11px] font-bold">
+                      <button
+                        onClick={() => setDeviceTab("ios")}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg whitespace-nowrap transition-all ${
+                          deviceTab === "ios"
+                            ? "bg-white text-[#4F46E5] shadow-xs"
+                            : "text-gray-600 hover:text-gray-900"
+                        }`}
                       >
                         <Smartphone className="h-3.5 w-3.5" />
-                        <span>{lang === "fa" ? "پروفایل آیفون/مک (.mobileconfig)" : "iOS/macOS Profile"}</span>
-                      </a>
+                        <span>{lang === "fa" ? "آیفون / iOS" : "iPhone / iOS"}</span>
+                      </button>
+
+                      <button
+                        onClick={() => setDeviceTab("android")}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg whitespace-nowrap transition-all ${
+                          deviceTab === "android"
+                            ? "bg-white text-green-600 shadow-xs"
+                            : "text-gray-600 hover:text-gray-900"
+                        }`}
+                      >
+                        <Smartphone className="h-3.5 w-3.5 text-green-600" />
+                        <span>{lang === "fa" ? "اندروید" : "Android"}</span>
+                      </button>
+
+                      <button
+                        onClick={() => setDeviceTab("windows")}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg whitespace-nowrap transition-all ${
+                          deviceTab === "windows"
+                            ? "bg-white text-blue-600 shadow-xs"
+                            : "text-gray-600 hover:text-gray-900"
+                        }`}
+                      >
+                        <Monitor className="h-3.5 w-3.5 text-blue-600" />
+                        <span>{lang === "fa" ? "ویندوز" : "Windows"}</span>
+                      </button>
+
+                      <button
+                        onClick={() => setDeviceTab("wireguard")}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg whitespace-nowrap transition-all ${
+                          deviceTab === "wireguard"
+                            ? "bg-white text-emerald-600 shadow-xs"
+                            : "text-gray-600 hover:text-gray-900"
+                        }`}
+                      >
+                        <Shield className="h-3.5 w-3.5 text-emerald-600" />
+                        <span>WireGuard ⚡</span>
+                      </button>
+
+                      <button
+                        onClick={() => setDeviceTab("autoswitch")}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg whitespace-nowrap transition-all ${
+                          deviceTab === "autoswitch"
+                            ? "bg-white text-purple-600 shadow-xs"
+                            : "text-gray-600 hover:text-gray-900"
+                        }`}
+                      >
+                        <Globe className="h-3.5 w-3.5 text-purple-600" />
+                        <span>Clash / V2Ray</span>
+                      </button>
+
+                      <button
+                        onClick={() => setDeviceTab("openvpn")}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg whitespace-nowrap transition-all ${
+                          deviceTab === "openvpn"
+                            ? "bg-white text-amber-600 shadow-xs"
+                            : "text-gray-600 hover:text-gray-900"
+                        }`}
+                      >
+                        <Lock className="h-3.5 w-3.5 text-amber-600" />
+                        <span>OpenVPN</span>
+                      </button>
                     </div>
-                  </div>
 
-                  {/* Android Native VPN (IKEv2/IPsec) [Android 12+ Replacement for L2TP] */}
-                  <div className="space-y-3 pt-2 border-t border-gray-100">
-                    <h4 className="text-xs font-bold text-gray-900 border-r-2 border-green-500 pr-2 flex items-center gap-1.5">
-                      <Smartphone className="h-4 w-4 text-green-500 animate-pulse" />
-                      {lang === "fa" ? "جایگزین اندروید ۱۲+ (IKEv2/IPsec)" : "Android 12+ Native VPN (IKEv2/IPsec)"}
-                    </h4>
-                    <p className="text-[10px] text-gray-500">
-                      {lang === "fa" 
-                        ? "در اندروید ۱۲ به بالا پروتکل L2TP حذف شده است. برای اتصال بدون هیچ برنامه‌ای در تنظیمات گوشی، از پروفایل IKEv2 استفاده کنید:" 
-                        : "Android 12+ has removed L2TP. To connect natively from your phone settings without any app, use this IKEv2 profile:"}
-                    </p>
-                    
-                    <div className="grid grid-cols-2 gap-3 text-[10px]">
-                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
-                        <span className="text-gray-400 block text-[8px] font-semibold mb-1">
-                          {lang === "fa" ? "نوع اتصال VPN" : "VPN Type"}
-                        </span>
-                        <code className="font-mono text-gray-800 break-all font-bold">IKEv2/IPsec MSCHAPv2</code>
-                      </div>
-
-                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
-                        <span className="text-gray-400 block text-[8px] font-semibold mb-1">
-                          {lang === "fa" ? "آدرس سرور / Server Address" : "Server IP / DNS"}
-                        </span>
-                        <div className="flex items-center justify-between">
-                          <code className="font-mono text-gray-800 break-all">{selectedSub.l2tpServerIp}</code>
-                          <button 
-                            onClick={() => triggerCopy(selectedSub.l2tpServerIp, "ikev2_ip")}
-                            className="text-gray-400 hover:text-gray-900 transition-all mr-1"
+                    {/* ================= 1. TAB: iOS (iPhone / iPad) ================= */}
+                    {deviceTab === "ios" && (
+                      <div className="space-y-3 bg-gray-50/70 p-4 rounded-2xl border border-gray-100">
+                        <div className="flex items-center justify-between pb-2 border-b border-gray-200/60">
+                          <div>
+                            <h4 className="text-xs font-bold text-gray-900 flex items-center gap-1.5">
+                              <Smartphone className="h-4 w-4 text-[#4F46E5]" />
+                              {lang === "fa" ? "تنظیمات آیفون / آیپد (iOS Settings -> VPN)" : "iOS Settings -> VPN Configuration"}
+                            </h4>
+                            <p className="text-[10px] text-gray-500 mt-0.5">
+                              {lang === "fa"
+                                ? "دقیقاً مطابق فیلدهای انگلیسی صفحه Add VPN Configuration در گوشی اپل وارد کنید:"
+                                : "Fill in these exact English fields in Settings > General > VPN & Device Management > Add VPN Configuration:"}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => downloadBlob(`L2TP_${selectedSub.username}.mobileconfig`, getAppleMobileConfig(selectedSub), "application/x-apple-aspen-config")}
+                            className="bg-[#4F46E5] text-white hover:bg-[#4338CA] px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
                           >
-                            {copiedId === "ikev2_ip" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                            <Download className="h-3 w-3" />
+                            <span>{lang === "fa" ? "دانلود پروفایل iOS" : "Download .mobileconfig"}</span>
+                          </button>
+                        </div>
+
+                        {/* iOS Exact Field List */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px]">
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">Type</span>
+                            <span className="font-mono font-bold text-gray-800">L2TP</span>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">Description</span>
+                            <span className="font-mono text-gray-800">Sanaei L2TP</span>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">Server</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpServerIp, "ios_server")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "ios_server" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpServerIp}</code>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">Account</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpUser, "ios_account")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "ios_account" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpUser}</code>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">RSA SecurID</span>
+                            <span className="font-mono text-gray-600">OFF</span>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">Password</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpPass, "ios_pass")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "ios_pass" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpPass}</code>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">Secret</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpPsk, "ios_secret")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "ios_secret" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpPsk}</code>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">Send All Traffic</span>
+                            <span className="font-mono text-green-600 font-bold">ON (Enabled)</span>
+                          </div>
+                        </div>
+
+                        <div className="flex justify-end pt-1">
+                          <button
+                            onClick={() => triggerCopy(`Type: L2TP\nServer: ${selectedSub.l2tpServerIp}\nAccount: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}\nSecret: ${selectedSub.l2tpPsk}\nSend All Traffic: ON`, "ios_all")}
+                            className="text-[#4F46E5] hover:underline text-[10px] font-bold flex items-center gap-1"
+                          >
+                            {copiedId === "ios_all" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                            <span>{lang === "fa" ? "کپی یکجای تمام مشخصات آیفون" : "Copy All iOS Fields"}</span>
                           </button>
                         </div>
                       </div>
+                    )}
 
-                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
-                        <span className="text-gray-400 block text-[8px] font-semibold mb-1">
-                          {lang === "fa" ? "شناسه IPSec / شناسه محلی" : "IPSec Identifier / Local ID"}
-                        </span>
-                        <div className="flex items-center justify-between">
-                          <code className="font-mono text-gray-800 break-all">{selectedSub.l2tpServerIp}</code>
-                          <button 
-                            onClick={() => triggerCopy(selectedSub.l2tpServerIp, "ikev2_id")}
-                            className="text-gray-400 hover:text-gray-900 transition-all mr-1"
+                    {/* ================= 2. TAB: Android Phone ================= */}
+                    {deviceTab === "android" && (
+                      <div className="space-y-3 bg-gray-50/70 p-4 rounded-2xl border border-gray-100">
+                        <div className="flex items-center justify-between pb-2 border-b border-gray-200/60">
+                          <div>
+                            <h4 className="text-xs font-bold text-gray-900 flex items-center gap-1.5">
+                              <Smartphone className="h-4 w-4 text-green-600" />
+                              {lang === "fa" ? "تنظیمات گوشی اندروید (Android Settings -> VPN)" : "Android Settings -> VPN Configuration"}
+                            </h4>
+                            <p className="text-[10px] text-gray-500 mt-0.5">
+                              {lang === "fa"
+                                ? "دقیقاً مطابق فیلدهای انگلیسی صفحه Add VPN در گوشی‌های سامسونگ، شیائومی و گوگل:"
+                                : "Fill in these exact English fields in Settings > Connections > More connection settings > VPN > Add VPN:"}
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Android Exact Field List */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px]">
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">Name</span>
+                            <span className="font-mono text-gray-800 font-semibold">Sanaei L2TP</span>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">Type</span>
+                            <span className="font-mono font-bold text-gray-800">L2TP/IPSec PSK</span>
+                            <span className="text-[8px] text-gray-400 block mt-0.5">(or IKEv2/IPSec MSCHAPv2 on Android 12+)</span>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">Server address</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpServerIp, "and_server")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "and_server" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpServerIp}</code>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">L2TP secret</span>
+                            <span className="text-gray-400 italic text-[10px]">(Leave blank)</span>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">IPSec identifier</span>
+                            <span className="text-gray-400 italic text-[10px]">(Leave blank)</span>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">IPSec pre-shared key</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpPsk, "and_psk")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "and_psk" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpPsk}</code>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">Username</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpUser, "and_user")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "and_user" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpUser}</code>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">Password</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpPass, "and_pass")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "and_pass" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpPass}</code>
+                          </div>
+                        </div>
+
+                        <div className="flex justify-end pt-1">
+                          <button
+                            onClick={() => triggerCopy(`Name: Sanaei L2TP\nType: L2TP/IPSec PSK\nServer address: ${selectedSub.l2tpServerIp}\nIPSec pre-shared key: ${selectedSub.l2tpPsk}\nUsername: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}`, "and_all")}
+                            className="text-green-600 hover:underline text-[10px] font-bold flex items-center gap-1"
                           >
-                            {copiedId === "ikev2_id" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                            {copiedId === "and_all" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                            <span>{lang === "fa" ? "کپی یکجای مشخصات اندروید" : "Copy All Android Fields"}</span>
                           </button>
                         </div>
                       </div>
+                    )}
 
-                      <div className="bg-gray-50 rounded-xl p-3 border border-gray-100">
-                        <span className="text-gray-400 block text-[8px] font-semibold mb-1">
-                          {lang === "fa" ? "نام کاربری و کلمه عبور" : "Username & Password"}
-                        </span>
-                        <div className="flex items-center justify-between">
-                          <code className="font-mono text-gray-800 break-all">{selectedSub.l2tpUser}</code>
-                          <button 
-                            onClick={() => triggerCopy(`${selectedSub.l2tpUser} | ${selectedSub.l2tpPass}`, "ikev2_credentials")}
-                            className="text-[#4F46E5] hover:underline text-[9px] font-bold"
+                    {/* ================= 3. TAB: Windows PC ================= */}
+                    {deviceTab === "windows" && (
+                      <div className="space-y-3 bg-gray-50/70 p-4 rounded-2xl border border-gray-100">
+                        <div className="flex items-center justify-between pb-2 border-b border-gray-200/60">
+                          <div>
+                            <h4 className="text-xs font-bold text-gray-900 flex items-center gap-1.5">
+                              <Monitor className="h-4 w-4 text-blue-600" />
+                              {lang === "fa" ? "تنظیمات ویندوز ۱۰ و ۱۱ (Windows Settings -> VPN)" : "Windows 10/11 Settings -> VPN"}
+                            </h4>
+                            <p className="text-[10px] text-gray-500 mt-0.5">
+                              {lang === "fa"
+                                ? "دقیقاً مطابق فیلدهای انگلیسی صفحه Add a VPN connection در ویندوز:"
+                                : "Fill in these exact English fields in Windows Settings > Network & Internet > VPN > Add VPN:"}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => downloadBlob(`L2TP_${selectedSub.username}.pbk`, getWindowsPbk(selectedSub), "text/plain")}
+                            className="bg-blue-600 text-white hover:bg-blue-700 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
                           >
-                            {copiedId === "ikev2_credentials" ? (lang === "fa" ? "کپی شد" : "Copied") : (lang === "fa" ? "کپی هردو" : "Copy Both")}
+                            <Download className="h-3 w-3" />
+                            <span>{lang === "fa" ? "دانلود دایلر ویندوز (.pbk)" : "Download Windows .pbk"}</span>
+                          </button>
+                        </div>
+
+                        {/* Windows Exact Field List */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px]">
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">VPN provider</span>
+                            <span className="font-mono text-gray-800 font-semibold">Windows (built-in)</span>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">Connection name</span>
+                            <span className="font-mono text-gray-800">Sanaei L2TP VPN</span>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">Server name or address</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpServerIp, "win_server")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "win_server" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpServerIp}</code>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">VPN type</span>
+                            <span className="font-mono font-bold text-gray-800">L2TP/IPsec with pre-shared key</span>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">Pre-shared key</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpPsk, "win_psk")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "win_psk" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpPsk}</code>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[9px] font-bold">Type of sign-in info</span>
+                            <span className="font-mono text-gray-800">User name and password</span>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">User name</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpUser, "win_user")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "win_user" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpUser}</code>
+                          </div>
+
+                          <div className="bg-white p-2.5 rounded-xl border border-gray-150">
+                            <div className="flex items-center justify-between mb-0.5">
+                              <span className="text-gray-400 block text-[9px] font-bold">Password</span>
+                              <button onClick={() => triggerCopy(selectedSub.l2tpPass, "win_pass")} className="text-gray-400 hover:text-gray-900">
+                                {copiedId === "win_pass" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{selectedSub.l2tpPass}</code>
+                          </div>
+                        </div>
+
+                        <div className="flex justify-end pt-1">
+                          <button
+                            onClick={() => triggerCopy(`VPN provider: Windows (built-in)\nServer name or address: ${selectedSub.l2tpServerIp}\nVPN type: L2TP/IPsec with pre-shared key\nPre-shared key: ${selectedSub.l2tpPsk}\nUser name: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}`, "win_all")}
+                            className="text-blue-600 hover:underline text-[10px] font-bold flex items-center gap-1"
+                          >
+                            {copiedId === "win_all" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                            <span>{lang === "fa" ? "کپی یکجای مشخصات ویندوز" : "Copy All Windows Fields"}</span>
                           </button>
                         </div>
                       </div>
-                    </div>
-                  </div>
+                    )}
 
-                  {/* Smart Subscription Links */}
-                  <div className="space-y-3 pt-2 border-t border-gray-100">
-                    <h4 className="text-xs font-bold text-gray-900 border-r-2 border-[#4F46E5] pr-2">
-                      {lang === "fa" ? "خروجی هوشمند سبک جدید (آپدیت و سوییچ خودکار)" : "New Style: Smart Auto-Switch Subscriptions"}
-                    </h4>
-
-                    {/* Base64 Link */}
-                    <div className="bg-gray-50 rounded-xl p-3 border border-gray-100 text-[11px] space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-gray-700">{lang === "fa" ? "لینک ساب V2Ray (سازگار با v2rayN, Shadowrocket)" : "Standard Base64 Sub Link"}</span>
-                        <div className="flex gap-2">
-                          <button 
-                            onClick={() => triggerCopy(`${window.location.origin}/api/sub/${selectedSub.id}`, "v2ray")}
-                            className="text-[#4F46E5] hover:underline flex items-center gap-1 text-[10px] font-bold"
-                          >
-                            {copiedId === "v2ray" ? <span className="text-green-600 font-semibold">{lang === "fa" ? "کپی شد" : "Copied"}</span> : <><Copy className="h-3 w-3" />{lang === "fa" ? "کپی لینک" : "Copy"}</>}
-                          </button>
-                        </div>
-                      </div>
-                      <code className="text-[10px] text-gray-500 font-mono block truncate bg-white p-1 rounded border border-gray-100">
-                        {`${window.location.origin}/api/sub/${selectedSub.id}`}
-                      </code>
-                    </div>
-
-                    {/* Clash Link */}
-                    <div className="bg-gray-50 rounded-xl p-3 border border-gray-100 text-[11px] space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-gray-700">{lang === "fa" ? "لینک ساب Clash Meta (سوییچ بر اساس تاخیر پینگ)" : "Clash Meta Sub (Auto-test Latency)"}</span>
-                        <div className="flex gap-2">
-                          <button 
-                            onClick={() => triggerCopy(`${window.location.origin}/api/sub/${selectedSub.id}?format=clash`, "clash")}
-                            className="text-[#4F46E5] hover:underline flex items-center gap-1 text-[10px] font-bold"
-                          >
-                            {copiedId === "clash" ? <span className="text-green-600 font-semibold">{lang === "fa" ? "کپی شد" : "Copied"}</span> : <><Copy className="h-3 w-3" />{lang === "fa" ? "کپی لینک" : "Copy"}</>}
-                          </button>
-                        </div>
-                      </div>
-                      <code className="text-[10px] text-gray-500 font-mono block truncate bg-white p-1 rounded border border-gray-100">
-                        {`${window.location.origin}/api/sub/${selectedSub.id}?format=clash`}
-                      </code>
-                    </div>
-
-                    {/* WireGuard New Style */}
-                    <div className="bg-gray-50 rounded-xl p-3 border border-gray-100 text-[11px] space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-gray-700">{lang === "fa" ? "تونل مدرن WireGuard (جایگزین ایمن L2TP)" : "Modern WireGuard Tunnel"}</span>
-                        <a 
-                          href={`/api/sub/${selectedSub.id}/wireguard-conf`}
-                          className="text-[#4F46E5] hover:underline text-[10px] font-bold flex items-center gap-1"
-                        >
-                          <Download className="h-3 w-3" />
-                          <span>{lang === "fa" ? "دانلود فایل .conf" : "Download Conf"}</span>
-                        </a>
-                      </div>
-                      
-                      <div className="flex justify-center py-2 bg-white rounded border border-gray-100">
-                        <QRCodeSVG value={`${window.location.origin}/api/sub/${selectedSub.id}/wireguard-conf`} size={110} />
-                      </div>
-                      <p className="text-[9px] text-gray-400 text-center">
-                        {lang === "fa" ? "اسکن بارکد در اپلیکیشن WireGuard جهت ایمپورت مستقیم تونل" : "Scan to load full-tunnel config directly into your WireGuard app"}
-                      </p>
-                    </div>
-
-                    {/* OpenVPN Style */}
-                    <div className="bg-gray-50 rounded-xl p-3 border border-gray-100 text-[11px] space-y-2.5">
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-gray-700">{lang === "fa" ? "پروتکل نوین OpenVPN (فول‌تونل و پایدار)" : "Modern OpenVPN Connection"}</span>
-                        <a 
-                          href={`/api/sub/${selectedSub.id}/openvpn-ovpn`}
-                          className="text-[#4F46E5] hover:underline text-[10px] font-bold flex items-center gap-1"
-                        >
-                          <Download className="h-3.5 w-3.5" />
-                          <span>{lang === "fa" ? "دانلود فایل .ovpn" : "Download .ovpn"}</span>
-                        </a>
-                      </div>
-                      
-                      <div className="grid grid-cols-2 gap-2 text-[10px] bg-white p-2.5 rounded-lg border border-gray-100 font-sans">
-                        <div>
-                          <span className="text-gray-400 block text-[8px] font-semibold mb-0.5">
-                            {lang === "fa" ? "نام کاربری OpenVPN" : "OpenVPN Username"}
-                          </span>
-                          <div className="flex items-center justify-between">
-                            <code className="font-mono text-gray-700">{selectedSub.openvpnUser || `vpn_${selectedSub.username}`}</code>
-                            <button 
-                              onClick={() => triggerCopy(selectedSub.openvpnUser || `vpn_${selectedSub.username}`, "ovpn_user")}
-                              className="text-gray-400 hover:text-gray-900 ml-1"
+                    {/* ================= 4. TAB: WireGuard ⚡ ================= */}
+                    {deviceTab === "wireguard" && (
+                      <div className="space-y-4 bg-emerald-50/40 p-4 rounded-2xl border border-emerald-100">
+                        <div className="flex items-center justify-between pb-2 border-b border-emerald-200/60">
+                          <div>
+                            <h4 className="text-xs font-bold text-gray-900 flex items-center gap-1.5">
+                              <Shield className="h-4 w-4 text-emerald-600" />
+                              {lang === "fa" ? "تونل رسمی WireGuard (اسکن QR کد واقعی یا دانلود)" : "Official WireGuard Tunnel (Direct QR Scan & .conf)"}
+                            </h4>
+                            <p className="text-[10px] text-gray-500 mt-0.5">
+                              {lang === "fa"
+                                ? "بارکد زیر حاوی کانفیگ خام و استاندارد وایرگارد است و مستقیماً توسط اپلیکیشن WireGuard در گوشی خوانده می‌شود:"
+                                : "This QR code directly encodes the full WireGuard configuration syntax for instant import:"}
+                            </p>
+                          </div>
+                          
+                          <div className="flex gap-1.5">
+                            <button
+                              onClick={() => downloadBlob(`WireGuard_${selectedSub.username}.conf`, getWireguardConf(selectedSub), "text/plain")}
+                              className="bg-emerald-600 text-white hover:bg-emerald-700 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
                             >
-                              {copiedId === "ovpn_user" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              <Download className="h-3 w-3" />
+                              <span>{lang === "fa" ? "دانلود .conf" : "Download .conf"}</span>
+                            </button>
+                            <button
+                              onClick={() => triggerCopy(getWireguardConf(selectedSub), "wg_full_conf")}
+                              className="bg-white text-emerald-800 border border-emerald-200 hover:bg-emerald-50 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 transition-all"
+                            >
+                              {copiedId === "wg_full_conf" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              <span>{lang === "fa" ? "کپی کانفیگ" : "Copy Conf"}</span>
                             </button>
                           </div>
                         </div>
-                        
+
+                        {/* Direct Working QR Code & Details */}
+                        <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+                          {/* QR Box */}
+                          <div className="md:col-span-4 flex flex-col items-center justify-center p-3 bg-white rounded-2xl border border-emerald-200 shadow-xs">
+                            <QRCodeSVG 
+                              value={getWireguardConf(selectedSub)} 
+                              size={140} 
+                              level="M" 
+                              marginSize={1}
+                            />
+                            <span className="text-[9px] text-gray-500 mt-2 font-semibold text-center">
+                              {lang === "fa" ? "اسکن با دوربین اپلیکیشن WireGuard" : "Scan in WireGuard Mobile App"}
+                            </span>
+                          </div>
+
+                          {/* WireGuard Exact Manual Parameters */}
+                          <div className="md:col-span-8 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px]">
+                            <div className="bg-white p-2 rounded-xl border border-gray-150">
+                              <div className="flex items-center justify-between mb-0.5">
+                                <span className="text-gray-400 font-bold text-[8px]">[Interface] PrivateKey</span>
+                                <button onClick={() => triggerCopy(selectedSub.wireguardPrivateKey, "wg_priv")} className="text-gray-400 hover:text-gray-900">
+                                  {copiedId === "wg_priv" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
+                                </button>
+                              </div>
+                              <code className="font-mono text-gray-800 break-all text-[9px]">{selectedSub.wireguardPrivateKey}</code>
+                            </div>
+
+                            <div className="bg-white p-2 rounded-xl border border-gray-150">
+                              <div className="flex items-center justify-between mb-0.5">
+                                <span className="text-gray-400 font-bold text-[8px]">[Interface] Address</span>
+                                <button onClick={() => triggerCopy(selectedSub.wireguardAddress || "10.8.0.2/24", "wg_addr")} className="text-gray-400 hover:text-gray-900">
+                                  {copiedId === "wg_addr" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
+                                </button>
+                              </div>
+                              <code className="font-mono text-gray-800 break-all text-[9px]">{selectedSub.wireguardAddress || "10.8.0.2/24"}</code>
+                            </div>
+
+                            <div className="bg-white p-2 rounded-xl border border-gray-150">
+                              <div className="flex items-center justify-between mb-0.5">
+                                <span className="text-gray-400 font-bold text-[8px]">[Peer] Endpoint</span>
+                                <button onClick={() => triggerCopy(`${selectedSub.l2tpServerIp}:${wgServerPortState || 51820}`, "wg_end")} className="text-gray-400 hover:text-gray-900">
+                                  {copiedId === "wg_end" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
+                                </button>
+                              </div>
+                              <code className="font-mono text-gray-800 break-all text-[9px]">{`${selectedSub.l2tpServerIp}:${wgServerPortState || 51820}`}</code>
+                            </div>
+
+                            <div className="bg-white p-2 rounded-xl border border-gray-150">
+                              <div className="flex items-center justify-between mb-0.5">
+                                <span className="text-gray-400 font-bold text-[8px]">[Peer] PublicKey</span>
+                                <button onClick={() => triggerCopy(wgServerPublicKeyState || selectedSub.wireguardPublicKey, "wg_pub")} className="text-gray-400 hover:text-gray-900">
+                                  {copiedId === "wg_pub" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
+                                </button>
+                              </div>
+                              <code className="font-mono text-gray-800 break-all text-[9px]">{wgServerPublicKeyState || selectedSub.wireguardPublicKey}</code>
+                            </div>
+
+                            <div className="bg-white p-2 rounded-xl border border-gray-150">
+                              <span className="text-gray-400 font-bold text-[8px] block">[Interface] DNS</span>
+                              <code className="font-mono text-gray-800 text-[9px]">{selectedSub.wireguardDns || "1.1.1.1, 8.8.8.8"}</code>
+                            </div>
+
+                            <div className="bg-white p-2 rounded-xl border border-gray-150">
+                              <span className="text-gray-400 font-bold text-[8px] block">[Peer] AllowedIPs</span>
+                              <code className="font-mono text-gray-800 text-[9px]">0.0.0.0/0, ::/0</code>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Raw Config Toggle */}
                         <div>
-                          <span className="text-gray-400 block text-[8px] font-semibold mb-0.5">
-                            {lang === "fa" ? "کلمه عبور OpenVPN" : "OpenVPN Password"}
-                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setShowRawWg(!showRawWg)}
+                            className="text-[10px] font-bold text-emerald-700 hover:underline flex items-center gap-1 cursor-pointer"
+                          >
+                            <span>{showRawWg ? (lang === "fa" ? "بستن متن کامل فایل کانفیگ" : "Hide raw configuration text") : (lang === "fa" ? "مشاهده متن کامل فایل کانفیگ WireGuard" : "View raw WireGuard configuration text")}</span>
+                          </button>
+
+                          {showRawWg && (
+                            <pre className="mt-2 text-[9px] font-mono bg-slate-900 text-emerald-400 p-3 rounded-xl overflow-x-auto leading-relaxed border border-slate-800">
+                              {getWireguardConf(selectedSub)}
+                            </pre>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ================= 5. TAB: Auto-Switch Subscriptions (Clash / V2Ray) ================= */}
+                    {deviceTab === "autoswitch" && (
+                      <div className="space-y-3 bg-purple-50/40 p-4 rounded-2xl border border-purple-100">
+                        <div className="pb-2 border-b border-purple-200/60">
+                          <h4 className="text-xs font-bold text-gray-900 flex items-center gap-1.5">
+                            <Globe className="h-4 w-4 text-purple-600" />
+                            {lang === "fa" ? "لینک‌های اشتراک هوشمند خودکار (Clash Meta / Sing-box / V2Ray)" : "Smart Auto-Switching Subscription Links"}
+                          </h4>
+                          <p className="text-[10px] text-gray-500 mt-0.5">
+                            {lang === "fa" ? "اتصال مدرن با قابلیت سوییچ هوشمند بین نودها بر اساس کمترین تاخیر پینگ:" : "Modern dynamic subscription links that auto-route traffic via the fastest node:"}
+                          </p>
+                        </div>
+
+                        {/* Base64 Link */}
+                        <div className="bg-white rounded-xl p-3 border border-gray-150 text-[11px] space-y-1.5">
                           <div className="flex items-center justify-between">
-                            <code className="font-mono text-gray-700">{selectedSub.openvpnPass || "SanaeiOVPNPass"}</code>
+                            <span className="font-semibold text-gray-700">{lang === "fa" ? "لینک ساب V2Ray (سازگار با v2rayN, Shadowrocket)" : "Standard Base64 Sub Link"}</span>
                             <button 
-                              onClick={() => triggerCopy(selectedSub.openvpnPass || "SanaeiOVPNPass", "ovpn_pass")}
-                              className="text-gray-400 hover:text-gray-900 ml-1"
+                              onClick={() => triggerCopy(`${window.location.origin}/api/sub/${selectedSub.id}`, "v2ray")}
+                              className="text-[#4F46E5] hover:underline flex items-center gap-1 text-[10px] font-bold"
                             >
-                              {copiedId === "ovpn_pass" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              {copiedId === "v2ray" ? <span className="text-green-600 font-semibold">{lang === "fa" ? "کپی شد" : "Copied"}</span> : <><Copy className="h-3 w-3" />{lang === "fa" ? "کپی لینک" : "Copy"}</>}
                             </button>
+                          </div>
+                          <code className="text-[10px] text-gray-500 font-mono block truncate bg-gray-50 p-1.5 rounded border border-gray-100">
+                            {`${window.location.origin}/api/sub/${selectedSub.id}`}
+                          </code>
+                        </div>
+
+                        {/* Clash Link */}
+                        <div className="bg-white rounded-xl p-3 border border-gray-150 text-[11px] space-y-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-gray-700">{lang === "fa" ? "لینک ساب Clash Meta (سوییچ خودکار با پینگ)" : "Clash Meta Sub (Auto-test Latency)"}</span>
+                            <button 
+                              onClick={() => triggerCopy(`${window.location.origin}/api/sub/${selectedSub.id}?format=clash`, "clash")}
+                              className="text-[#4F46E5] hover:underline flex items-center gap-1 text-[10px] font-bold"
+                            >
+                              {copiedId === "clash" ? <span className="text-green-600 font-semibold">{lang === "fa" ? "کپی شد" : "Copied"}</span> : <><Copy className="h-3 w-3" />{lang === "fa" ? "کپی لینک" : "Copy"}</>}
+                            </button>
+                          </div>
+                          <code className="text-[10px] text-gray-500 font-mono block truncate bg-gray-50 p-1.5 rounded border border-gray-100">
+                            {`${window.location.origin}/api/sub/${selectedSub.id}?format=clash`}
+                          </code>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* ================= 6. TAB: OpenVPN ================= */}
+                    {deviceTab === "openvpn" && (
+                      <div className="space-y-3 bg-amber-50/40 p-4 rounded-2xl border border-amber-100">
+                        <div className="flex items-center justify-between pb-2 border-b border-amber-200/60">
+                          <div>
+                            <h4 className="text-xs font-bold text-gray-900 flex items-center gap-1.5">
+                              <Lock className="h-4 w-4 text-amber-600" />
+                              {lang === "fa" ? "اتصال امن OpenVPN (پایدار و فول‌تونل)" : "OpenVPN Profile & Credentials"}
+                            </h4>
+                            <p className="text-[10px] text-gray-500 mt-0.5">
+                              {lang === "fa" ? "دانلود پروفایل با گواهی‌های رمزنگاری اختصاصی کلاینت:" : "Download the complete single-file .ovpn with embedded certificates:"}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => downloadBlob(`OpenVPN_${selectedSub.username}.ovpn`, getOpenVpnConfig(selectedSub), "text/plain")}
+                            className="bg-amber-600 text-white hover:bg-amber-700 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
+                          >
+                            <Download className="h-3 w-3" />
+                            <span>{lang === "fa" ? "دانلود فایل .ovpn" : "Download .ovpn"}</span>
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2 text-[10px] bg-white p-2.5 rounded-xl border border-gray-150 font-sans">
+                          <div>
+                            <span className="text-gray-400 block text-[8px] font-bold mb-0.5">Username</span>
+                            <div className="flex items-center justify-between">
+                              <code className="font-mono text-gray-700">{selectedSub.openvpnUser || `vpn_${selectedSub.username}`}</code>
+                              <button 
+                                onClick={() => triggerCopy(selectedSub.openvpnUser || `vpn_${selectedSub.username}`, "ovpn_user")}
+                                className="text-gray-400 hover:text-gray-900 ml-1"
+                              >
+                                {copiedId === "ovpn_user" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
+                          </div>
+                          
+                          <div>
+                            <span className="text-gray-400 block text-[8px] font-bold mb-0.5">Password</span>
+                            <div className="flex items-center justify-between">
+                              <code className="font-mono text-gray-700">{selectedSub.openvpnPass || "SanaeiOVPNPass"}</code>
+                              <button 
+                                onClick={() => triggerCopy(selectedSub.openvpnPass || "SanaeiOVPNPass", "ovpn_pass")}
+                                className="text-gray-400 hover:text-gray-900 ml-1"
+                              >
+                                {copiedId === "ovpn_pass" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                              </button>
+                            </div>
                           </div>
                         </div>
                       </div>
-
-                      <div className="flex justify-center py-2 bg-white rounded border border-gray-100">
-                        <QRCodeSVG value={`${window.location.origin}/api/sub/${selectedSub.id}/openvpn-ovpn`} size={110} />
-                      </div>
-                      <p className="text-[9px] text-gray-400 text-center">
-                        {lang === "fa" ? "اسکن بارکد در اپلیکیشن OpenVPN جهت دریافت اتوماتیک پروفایل" : "Scan to load full config directly into your OpenVPN client"}
-                      </p>
-                    </div>
+                    )}
                   </div>
 
                 </div>
@@ -1837,50 +2309,83 @@ export default function App() {
             <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 space-y-4">
               <div className="flex items-center gap-2 border-b border-gray-100 pb-3">
                 <div className="bg-amber-100 text-amber-800 px-2 py-0.5 rounded-md text-[10px] font-bold">
-                  {lang === "fa" ? "روش قدیم" : "Legacy"}
+                  {lang === "fa" ? "تنظیم مستقیم در گوشی و کامپیوتر" : "Native Device Setup"}
                 </div>
                 <h4 className="text-sm font-bold text-gray-900">
-                  {lang === "fa" ? "۱. تنظیم اتصال سنتی L2TP (ویندوز / آیفون قدیم)" : "1. Setup Traditional L2TP Tunnel"}
+                  {lang === "fa" ? "۱. آموزش گام‌به‌گام با نام دقیق فیلدهای انگلیسی گوشی" : "1. Step-by-Step Native Device Setup (Exact English Fields)"}
                 </h4>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-xs text-gray-600">
-                <div className="space-y-3">
-                  <h5 className="font-bold text-gray-800 flex items-center gap-1.5">
-                    <Monitor className="h-4 w-4 text-[#4F46E5]" />
-                    {lang === "fa" ? "آموزش در ویندوز (Windows 10/11)" : "Windows Setup Guide"}
-                  </h5>
-                  <ul className="list-decimal list-inside space-y-2 leading-relaxed">
-                    <li>{lang === "fa" ? "فایل کانفیگ با فرمت .pbk ارائه‌شده در پنل را دانلود کنید." : "Download the provided .pbk dialer profile."}</li>
-                    <li>{lang === "fa" ? "بر روی فایل دوبار کلیک کنید تا پنجره اتصال باز شود." : "Double click on the dialer file to open connections window."}</li>
-                    <li>{lang === "fa" ? "نام کاربری و کلمه عبور صادر شده را وارد کنید." : "Input your generated VPN username and password."}</li>
-                    <li>{lang === "fa" ? "کلید اتصال (Connect) را فشار دهید. ارتباط در چند ثانیه برقرار خواهد شد." : "Press 'Connect' to tunnel your full system traffic instantly."}</li>
-                  </ul>
-                </div>
-
-                <div className="space-y-3">
-                  <h5 className="font-bold text-gray-800 flex items-center gap-1.5">
+                {/* iOS */}
+                <div className="space-y-3 bg-gray-50/60 p-4 rounded-xl border border-gray-100">
+                  <h5 className="font-bold text-gray-800 flex items-center gap-1.5 border-b border-gray-200/60 pb-2">
                     <Smartphone className="h-4 w-4 text-[#4F46E5]" />
-                    {lang === "fa" ? "آموزش در آیفون (iOS) و مک (macOS)" : "Apple iOS & Mac Guide"}
+                    {lang === "fa" ? "آیفون و آیپد (Apple iOS)" : "Apple iOS (iPhone/iPad)"}
                   </h5>
-                  <ul className="list-decimal list-inside space-y-2 leading-relaxed">
-                    <li>{lang === "fa" ? "فایل .mobileconfig مخصوص اپل را از پنل دانلود کنید." : "Download the profile file .mobileconfig from your browser."}</li>
-                    <li>{lang === "fa" ? "به منوی تنظیمات گوشی رفته و روی Profile Downloaded بزنید." : "Go to iPhone Settings and tap on 'Profile Downloaded'."}</li>
-                    <li>{lang === "fa" ? "پروفایل L2TP را با زدن روی دکمه Install تایید و نصب کنید." : "Verify and click 'Install' to let iOS construct the VPN connection."}</li>
-                    <li>{lang === "fa" ? "حالا به قسمت VPN در تنظیمات بروید و سوییچ اتصال را فعال کنید." : "Now go to VPN Settings and toggle the connection switch on."}</li>
+                  <p className="text-[10px] text-gray-500">
+                    {lang === "fa"
+                      ? "مسیر: Settings > General > VPN & Device Management > Add VPN Configuration"
+                      : "Path: Settings > General > VPN & Device Management > Add VPN Configuration"}
+                  </p>
+                  <ul className="space-y-1.5 text-[11px] font-mono">
+                    <li><strong className="text-gray-900 font-sans">Type:</strong> L2TP</li>
+                    <li><strong className="text-gray-900 font-sans">Description:</strong> Sanaei L2TP</li>
+                    <li><strong className="text-gray-900 font-sans">Server:</strong> <code>[Server IP / Domain]</code></li>
+                    <li><strong className="text-gray-900 font-sans">Account:</strong> <code>[L2TP Username]</code></li>
+                    <li><strong className="text-gray-900 font-sans">RSA SecurID:</strong> OFF</li>
+                    <li><strong className="text-gray-900 font-sans">Password:</strong> <code>[L2TP Password]</code></li>
+                    <li><strong className="text-gray-900 font-sans">Secret:</strong> <code>[IPSec PSK]</code></li>
+                    <li><strong className="text-gray-900 font-sans">Send All Traffic:</strong> ON</li>
+                  </ul>
+                  <p className="text-[9px] text-indigo-600 font-sans pt-1">
+                    {lang === "fa" ? "💡 یا دکمه «دانلود پروفایل iOS» را بزنید تا بدون تایپ دستی نصب شود." : "💡 Or tap 'Download iOS Profile' for 1-tap installation."}
+                  </p>
+                </div>
+
+                {/* Android */}
+                <div className="space-y-3 bg-gray-50/60 p-4 rounded-xl border border-gray-100">
+                  <h5 className="font-bold text-gray-800 flex items-center gap-1.5 border-b border-gray-200/60 pb-2">
+                    <Smartphone className="h-4 w-4 text-green-600" />
+                    {lang === "fa" ? "اندروید (Android Settings)" : "Android Settings"}
+                  </h5>
+                  <p className="text-[10px] text-gray-500">
+                    {lang === "fa"
+                      ? "مسیر: Settings > Connections / Network & Internet > VPN > Add VPN (+)"
+                      : "Path: Settings > Connections / Network & Internet > VPN > Add VPN (+)"}
+                  </p>
+                  <ul className="space-y-1.5 text-[11px] font-mono">
+                    <li><strong className="text-gray-900 font-sans">Name:</strong> Sanaei L2TP</li>
+                    <li><strong className="text-gray-900 font-sans">Type:</strong> L2TP/IPSec PSK</li>
+                    <li><strong className="text-gray-900 font-sans">Server address:</strong> <code>[Server IP]</code></li>
+                    <li><strong className="text-gray-900 font-sans">L2TP secret:</strong> <em>(Leave blank)</em></li>
+                    <li><strong className="text-gray-900 font-sans">IPSec identifier:</strong> <em>(Leave blank)</em></li>
+                    <li><strong className="text-gray-900 font-sans">IPSec pre-shared key:</strong> <code>[IPSec PSK]</code></li>
+                    <li><strong className="text-gray-900 font-sans">Username:</strong> <code>[L2TP User]</code></li>
+                    <li><strong className="text-gray-900 font-sans">Password:</strong> <code>[L2TP Pass]</code></li>
                   </ul>
                 </div>
 
-                <div className="space-y-3">
-                  <h5 className="font-bold text-gray-800 flex items-center gap-1.5">
-                    <Smartphone className="h-4 w-4 text-green-600" />
-                    {lang === "fa" ? "آموزش در اندروید ۱۲+ (IKEv2/IPsec)" : "Android 12+ Setup Guide"}
+                {/* Windows */}
+                <div className="space-y-3 bg-gray-50/60 p-4 rounded-xl border border-gray-100">
+                  <h5 className="font-bold text-gray-800 flex items-center gap-1.5 border-b border-gray-200/60 pb-2">
+                    <Monitor className="h-4 w-4 text-blue-600" />
+                    {lang === "fa" ? "ویندوز (Windows 10/11)" : "Windows 10 / 11"}
                   </h5>
-                  <ul className="list-decimal list-inside space-y-2 leading-relaxed">
-                    <li>{lang === "fa" ? "به تنظیمات گوشی (Settings) -> شبکه و اینترنت (VPN) بروید." : "Go to Settings -> Network & Internet -> VPN."}</li>
-                    <li>{lang === "fa" ? "یک کانکشن جدید بسازید و نوع آن را روی IKEv2/IPsec MSCHAPv2 تنظیم کنید." : "Create a new VPN and set type to IKEv2/IPsec MSCHAPv2."}</li>
-                    <li>{lang === "fa" ? "آدرس سرور و شناسه IPSec (هر دو همان IP سرور) را وارد کنید." : "Input Server Address and IPSec Identifier (both are your Server IP)."}</li>
-                    <li>{lang === "fa" ? "نام کاربری و کلمه عبور را وارد کرده و دکمه ذخیره و اتصال را بزنید." : "Enter Username & Password, tap Save and toggle the switch on."}</li>
+                  <p className="text-[10px] text-gray-500">
+                    {lang === "fa"
+                      ? "مسیر: Settings > Network & Internet > VPN > Add a VPN connection"
+                      : "Path: Settings > Network & Internet > VPN > Add a VPN connection"}
+                  </p>
+                  <ul className="space-y-1.5 text-[11px] font-mono">
+                    <li><strong className="text-gray-900 font-sans">VPN provider:</strong> Windows (built-in)</li>
+                    <li><strong className="text-gray-900 font-sans">Connection name:</strong> Sanaei L2TP</li>
+                    <li><strong className="text-gray-900 font-sans">Server name/address:</strong> <code>[Server IP]</code></li>
+                    <li><strong className="text-gray-900 font-sans">VPN type:</strong> L2TP/IPsec with PSK</li>
+                    <li><strong className="text-gray-900 font-sans">Pre-shared key:</strong> <code>[IPSec PSK]</code></li>
+                    <li><strong className="text-gray-900 font-sans">Type of sign-in:</strong> User name and password</li>
+                    <li><strong className="text-gray-900 font-sans">User name:</strong> <code>[L2TP User]</code></li>
+                    <li><strong className="text-gray-900 font-sans">Password:</strong> <code>[L2TP Pass]</code></li>
                   </ul>
                 </div>
               </div>
