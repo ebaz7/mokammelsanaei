@@ -25,7 +25,8 @@ import {
   Key, 
   Wifi, 
   ArrowRight,
-  ExternalLink
+  ExternalLink,
+  Lock
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { Panel, SmartSubscription, MockNode } from "./types";
@@ -82,29 +83,38 @@ export default function App() {
 
   // Helper generators for client-side instant profile downloads and QR codes
   const getWireguardConf = (sub: SmartSubscription) => {
+    if (!sub) return "";
+    const priv = sub.wireguardPrivateKey || "aHR0cHM6Ly9naXRodWIuY29tL01IU2FuYWVpLzN4LXVpCg==";
+    const addr = sub.wireguardAddress || "10.8.0.2/24";
+    const dns = sub.wireguardDns || "1.1.1.1, 8.8.8.8";
     const serverPub = wgServerPublicKeyState || sub.wireguardPublicKey || "bm90LXNldC1wbGVhc2Utc2V0LXBr";
+    const serverIp = sub.l2tpServerIp || window.location.hostname || "127.0.0.1";
     const serverPort = wgServerPortState || 51820;
     return `[Interface]
-PrivateKey = ${sub.wireguardPrivateKey}
-Address = ${sub.wireguardAddress || "10.8.0.2/24"}
-DNS = ${sub.wireguardDns || "1.1.1.1, 8.8.8.8"}
+PrivateKey = ${priv}
+Address = ${addr}
+DNS = ${dns}
 
 [Peer]
 PublicKey = ${serverPub}
-Endpoint = ${sub.l2tpServerIp}:${serverPort}
+Endpoint = ${serverIp}:${serverPort}
 AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 `;
   };
 
   const getWindowsPbk = (sub: SmartSubscription) => {
-    return `[L2TP_VPN_${sub.username}]
+    if (!sub) return "";
+    const user = sub.username || "user";
+    const serverIp = sub.l2tpServerIp || "127.0.0.1";
+    const psk = sub.l2tpPsk || "SanaeiL2TPSecureKey";
+    return `[L2TP_VPN_${user}]
 MEDIA=rastapi
 Port=VPN2-0
 Device=WAN Miniport (L2TP)
 DEVICE=vpn
-PhoneNumber=${sub.l2tpServerIp}
-IPSecSharedKey=${sub.l2tpPsk}
+PhoneNumber=${serverIp}
+IPSecSharedKey=${psk}
 UsePreSharedKey=1
 EncryptionType=Require
 CustomDialDll=
@@ -113,11 +123,17 @@ CustomDialFunc=
   };
 
   const getAppleMobileConfig = (sub: SmartSubscription) => {
+    if (!sub) return "";
+    const user = sub.username || "user";
+    const l2tpUser = sub.l2tpUser || user;
+    const l2tpPass = sub.l2tpPass || "password";
+    const serverIp = sub.l2tpServerIp || "127.0.0.1";
+    const psk = sub.l2tpPsk || "SanaeiL2TPSecureKey";
     let pskBase64 = "";
     try {
-      pskBase64 = btoa(sub.l2tpPsk || "SanaeiL2TPSecureKey");
+      pskBase64 = btoa(psk);
     } catch {
-      pskBase64 = sub.l2tpPsk;
+      pskBase64 = psk;
     }
     return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -141,18 +157,18 @@ CustomDialFunc=
 			<key>PPP</key>
 			<dict>
 				<key>AuthName</key>
-				<string>${sub.l2tpUser}</string>
+				<string>${l2tpUser}</string>
 				<key>AuthPassword</key>
-				<string>${sub.l2tpPass}</string>
+				<string>${l2tpPass}</string>
 				<key>CommRemoteAddress</key>
-				<string>${sub.l2tpServerIp}</string>
+				<string>${serverIp}</string>
 			</dict>
 			<key>PayloadDescription</key>
 			<string>Configures legacy and secure L2TP/IPSec VPN</string>
 			<key>PayloadDisplayName</key>
-			<string>L2TP VPN (${sub.username})</string>
+			<string>L2TP VPN (${user})</string>
 			<key>PayloadIdentifier</key>
-			<string>com.sanaei.l2tp.${sub.username}</string>
+			<string>com.sanaei.l2tp.${user}</string>
 			<key>PayloadType</key>
 			<string>com.apple.vpn.managed</string>
 			<key>PayloadUUID</key>
@@ -160,15 +176,15 @@ CustomDialFunc=
 			<key>PayloadVersion</key>
 			<integer>1</integer>
 			<key>UserDefinedName</key>
-			<string>L2TP - ${sub.username}</string>
+			<string>L2TP - ${user}</string>
 			<key>VPNType</key>
 			<string>L2TP</string>
 		</dict>
 	</array>
 	<key>PayloadDisplayName</key>
-	<string>L2TP VPN Configuration - ${sub.username}</string>
+	<string>L2TP VPN Configuration - ${user}</string>
 	<key>PayloadIdentifier</key>
-	<string>com.sanaei.profile.${sub.username}</string>
+	<string>com.sanaei.profile.${user}</string>
 	<key>PayloadRemovalDisallowed</key>
 	<false/>
 	<key>PayloadType</key>
@@ -182,10 +198,14 @@ CustomDialFunc=
   };
 
   const getOpenVpnConfig = (sub: SmartSubscription) => {
+    if (!sub) return "";
+    const serverIp = sub.l2tpServerIp || "127.0.0.1";
+    const user = sub.openvpnUser || `vpn_${sub.username || "user"}`;
+    const pass = sub.openvpnPass || "SanaeiOVPNPass";
     return `client
 dev tun
 proto ${sub.openvpnProto || "udp"}
-remote ${sub.l2tpServerIp} ${sub.openvpnPort || 1194}
+remote ${serverIp} ${sub.openvpnPort || 1194}
 resolv-retry infinite
 nobind
 persist-key
@@ -199,8 +219,8 @@ keepalive 10 60
 # Inlined User Authentication
 auth-user-pass
 <auth-user-pass>
-${sub.openvpnUser || `vpn_${sub.username}`}
-${sub.openvpnPass || "SanaeiOVPNPass"}
+${user}
+${pass}
 </auth-user-pass>
 
 <ca>
