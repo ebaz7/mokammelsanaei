@@ -2268,6 +2268,7 @@ function getInboundBridgePorts(inbound: any, index: number) {
   const wgPort = inbound?.bridgeWgPort || inbound?.wgPort || (51820 + index);
   const openvpnPort = inbound?.bridgeOpenvpnPort || inbound?.openvpnPort || (1194 + index);
   const socksPort = inbound?.bridgeSocksPort || (10808 + index);
+  const tproxyPort = 12345 + index;
   const subnetIndex = typeof inbound?.bridgeSubnetIndex === "number" ? inbound.bridgeSubnetIndex : index;
   const wgSubnet = `10.8.${subnetIndex}.0/24`;
   const wgServerIp = `10.8.${subnetIndex}.1`;
@@ -2292,6 +2293,7 @@ function getInboundBridgePorts(inbound: any, index: number) {
     tunDevice,
     wgInterface,
     fwMark,
+    tproxyPort,
   };
 }
 
@@ -2438,20 +2440,11 @@ app.get("/api/bridge/config", (req, res) => {
     const inTagSocks = `socks-in-${idx}`;
     const inTagTproxy = `tproxy-in-${idx}`;
 
-    // Add local SOCKS5 inbound for this specific node
-    xrayInbounds.push({
-      tag: inTagSocks,
-      port: ports.socksPort,
-      listen: "127.0.0.1",
-      protocol: "socks",
-      settings: { auth: "noauth", udp: true }
-    });
-
     // Add local TProxy inbound for this specific node
     xrayInbounds.push({
       tag: inTagTproxy,
-      port: 12345 + idx,
-      listen: "127.0.0.1",
+      port: ports.tproxyPort,
+      listen: "0.0.0.0",
       protocol: "dokodemo-door",
       settings: { network: "tcp,udp", followRedirect: true },
       streamSettings: { sockopt: { tproxy: "tproxy" } }
@@ -2477,7 +2470,7 @@ app.get("/api/bridge/config", (req, res) => {
       // Route this specific client IP to their dedicated outbound with their real UUID
       routingRules.push({
         type: "field",
-        inboundTag: [inTagSocks, inTagTproxy],
+        inboundTag: [inTagTproxy],
         sourceIP: [clientIp, ovpnClientIp, l2tpClientIp],
         outTag: userOutboundTag
       });
@@ -2486,7 +2479,7 @@ app.get("/api/bridge/config", (req, res) => {
     // 3. Fallback Route for any other/anonymous clients using the fallback outbound
     routingRules.push({
       type: "field",
-      inboundTag: [inTagSocks, inTagTproxy],
+      inboundTag: [inTagTproxy],
       outTag: fallbackTag
     });
   });
@@ -2522,46 +2515,26 @@ app.get("/install-bridge.sh", (req, res) => {
     multiInboundSetupBash += `
 # ==============================================================================
 # Inbound Node [${idx + 1}/${inboundsList.length}]: ${inb.tag} (${inb.serverIp}:${inb.port})
-# WireGuard Port: ${ports.wgPort} | OpenVPN Port: ${ports.openvpnPort} | SOCKS5: ${ports.socksPort}
+# WireGuard Port: ${ports.wgPort} | OpenVPN Port: ${ports.openvpnPort} | TPROXY: ${ports.tproxyPort}
 # ==============================================================================
-echo -e "\${CYAN}Configuring Dedicated Tunnel for Inbound: ${inb.tag} (WG Port ${ports.wgPort}, SOCKS ${ports.socksPort})...\${NC}"
+echo -e "\\${CYAN}Configuring Dedicated Tunnel for Inbound: ${inb.tag} (WG Port ${ports.wgPort}, TPROXY ${ports.tproxyPort})...\\${NC}"
 
-# 1. Create Tun2socks instance for this inbound
-cat <<EOF >/etc/systemd/system/tun2socks-inb-${idx}.service
-[Unit]
-Description=Tun2socks Bridge for Inbound ${inb.tag}
-After=network.target xray.service
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/tun2socks -device ${ports.tunDevice} -proxy socks5://127.0.0.1:${ports.socksPort} -interface lo
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 2. Setup TUN interface and IP routing table ${ports.fwMark}
-ip tuntap add mode tun dev ${ports.tunDevice} 2>/dev/null || true
-ip addr add 198.18.${idx + 1}.1/24 dev ${ports.tunDevice} 2>/dev/null || true
-ip link set dev ${ports.tunDevice} up 2>/dev/null || true
-
+# 1. Setup IP routing table ${ports.fwMark} for TPROXY
 ip rule del fwmark ${ports.fwMark} 2>/dev/null || true
-ip route del default dev ${ports.tunDevice} table ${ports.fwMark} 2>/dev/null || true
-ip route add default dev ${ports.tunDevice} table ${ports.fwMark} 2>/dev/null || true
+ip route del local default dev lo table ${ports.fwMark} 2>/dev/null || true
+ip route add local default dev lo table ${ports.fwMark} 2>/dev/null || true
 ip rule add fwmark ${ports.fwMark} table ${ports.fwMark} 2>/dev/null || true
 
-# 3. Mark packets from WireGuard subnet (${ports.wgSubnet}) & OpenVPN subnet (${ports.ovpnSubnet})
-iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -j MARK --set-mark ${ports.fwMark} 2>/dev/null || true
-iptables -t mangle -D PREROUTING -s ${ports.ovpnSubnet} -j MARK --set-mark ${ports.fwMark} 2>/dev/null || true
-iptables -t mangle -A PREROUTING -s ${ports.wgSubnet} -j MARK --set-mark ${ports.fwMark}
-iptables -t mangle -A PREROUTING -s ${ports.ovpnSubnet} -j MARK --set-mark ${ports.fwMark}
+# 2. Mark packets from WireGuard subnet (${ports.wgSubnet}) & OpenVPN subnet (${ports.ovpnSubnet}) to TPROXY
+iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
+iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -p udp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
+iptables -t mangle -D PREROUTING -s ${ports.ovpnSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
+iptables -t mangle -D PREROUTING -s ${ports.ovpnSubnet} -p udp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
 
-# Enable & restart service
-systemctl enable tun2socks-inb-${idx} 2>/dev/null
-systemctl restart tun2socks-inb-${idx} 2>/dev/null
+iptables -t mangle -A PREROUTING -s ${ports.wgSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark}
+iptables -t mangle -A PREROUTING -s ${ports.wgSubnet} -p udp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark}
+iptables -t mangle -A PREROUTING -s ${ports.ovpnSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark}
+iptables -t mangle -A PREROUTING -s ${ports.ovpnSubnet} -p udp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark}
 `;
   });
 
@@ -2587,28 +2560,15 @@ echo -e "\${CYAN}===============================================================
 echo -e "\${CYAN}    🌉 Setting up Multi-Inbound Dedicated Bridge Gateway         \${NC}"
 echo -e "\${CYAN}==================================================================\${NC}"
 
-# 1. Install prerequisites (tun2socks, xray, wireguard, strongswan, xl2tpd, openvpn)
-echo -e "\${YELLOW}[1/4] Installing Xray-core, Tun2socks and VPN daemons...\${NC}"
+# 1. Install prerequisites (xray, wireguard, strongswan, xl2tpd, openvpn)
+echo -e "\\${YELLOW}[1/4] Installing Xray-core and VPN daemons...\\${NC}"
 apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \\
   curl wget jq iptables iproute2 wireguard strongswan xl2tpd ppp openvpn net-tools
 
 # Download Xray-core if not present
 if ! command -v xray >/dev/null 2>&1; then
-  echo -e "\${YELLOW}Installing latest Xray-core...\${NC}"
+  echo -e "\\${YELLOW}Installing latest Xray-core...\\${NC}"
   bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-fi
-
-# Download tun2socks release
-if ! command -v tun2socks >/dev/null 2>&1; then
-  echo -e "\${YELLOW}Installing Tun2socks binary...\${NC}"
-  ARCH=$(uname -m)
-  if [ "$ARCH" = "x86_64" ]; then TUN_ARCH="linux-amd64"; elif [ "$ARCH" = "aarch64" ]; then TUN_ARCH="linux-arm64"; else TUN_ARCH="linux-amd64"; fi
-  wget -qO /tmp/tun2socks.zip "https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-\${TUN_ARCH}.zip"
-  apt-get install -y unzip
-  unzip -qo /tmp/tun2socks.zip -d /tmp/tun2socks_bin
-  cp /tmp/tun2socks_bin/tun2socks* /usr/local/bin/tun2socks 2>/dev/null || cp /tmp/tun2socks_bin/tun2socks /usr/local/bin/
-  chmod +x /usr/local/bin/tun2socks
-  rm -rf /tmp/tun2socks*
 fi
 
 # Enable IP forwarding
@@ -2626,7 +2586,10 @@ systemctl daemon-reload
 
 ${multiInboundSetupBash}
 
-echo -e "\${GREEN}==================================================================\${NC}"
+# Save iptables rules
+netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables.rules 2>/dev/null
+
+echo -e "\\${GREEN}==================================================================\\${NC}"
 echo -e "\${GREEN}  ✅ Multi-Inbound Dedicated Bridge Gateway is Active!          \${NC}"
 echo -e "\${GREEN}  Each Inbound has its own independent WireGuard / OpenVPN port. \${NC}"
 echo -e "\${GREEN}  Connecting to any profile routes strictly and solely through   \${NC}"

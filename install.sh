@@ -547,81 +547,11 @@ setup_v2ray_middle_bridge() {
   echo -e "${YELLOW}تونل ضد فیلتر Xray/V2Ray (VLESS REALITY / VMess / Trojan) به سرور خارج هدایت می‌کند.${NC}"
   echo ""
 
-  # 1. Install prerequisites (tun2socks, xray, wireguard, strongswan, xl2tpd)
-  echo -e "${BLUE}[1/4] Installing Xray-core, Tun2socks and network tools...${NC}"
-  apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    curl wget jq iptables iproute2 wireguard strongswan xl2tpd ppp openvpn net-tools unzip
-
-  # Download Xray-core if not present
-  if ! command -v xray >/dev/null 2>&1; then
-    echo -e "${YELLOW}Installing latest Xray-core...${NC}"
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-  fi
-
-  # Download tun2socks release
-  if ! command -v tun2socks >/dev/null 2>&1; then
-    echo -e "${YELLOW}Installing Tun2socks binary...${NC}"
-    ARCH=$(uname -m)
-    if [ "$ARCH" = "x86_64" ]; then TUN_ARCH="linux-amd64"; elif [ "$ARCH" = "aarch64" ]; then TUN_ARCH="linux-arm64"; else TUN_ARCH="linux-amd64"; fi
-    wget -qO /tmp/tun2socks.zip "https://github.com/xjasonlyu/tun2socks/releases/latest/download/tun2socks-${TUN_ARCH}.zip"
-    unzip -qo /tmp/tun2socks.zip -d /tmp/tun2socks_bin
-    cp /tmp/tun2socks_bin/tun2socks* /usr/local/bin/tun2socks 2>/dev/null || cp /tmp/tun2socks_bin/tun2socks /usr/local/bin/
-    chmod +x /usr/local/bin/tun2socks
-    rm -rf /tmp/tun2socks*
-  fi
-
-  # 2. Configure Bridge Systemd Service
-  echo -e "${BLUE}[2/4] Configuring Tun2socks Systemd service (VPN -> SOCKS5 127.0.0.1:10808)...${NC}"
-
-  cat <<EOF >/etc/systemd/system/vpn-v2ray-bridge.service
-[Unit]
-Description=VPN to V2Ray Bridge (Tun2socks Routing)
-After=network.target xray.service
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/tun2socks -device tun2 -proxy socks5://127.0.0.1:10808 -interface lo
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  # 3. Kernel & IPTables Routing Rules
-  echo -e "${BLUE}[3/4] Setting up Kernel IP Routing for WireGuard, L2TP, and OpenVPN...${NC}"
-  sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-  # Create tun2 interface if needed and route VPN subnets through it
-  ip tuntap add mode tun dev tun2 2>/dev/null || true
-  ip addr add 198.18.0.1/15 dev tun2 2>/dev/null || true
-  ip link set dev tun2 up 2>/dev/null || true
-
-  # Routing Table for Tun2socks
-  ip rule del fwmark 0x1 2>/dev/null || true
-  ip route del default dev tun2 table 100 2>/dev/null || true
-  ip route add default dev tun2 table 100 2>/dev/null || true
-  ip rule add fwmark 0x1 table 100 2>/dev/null || true
-
-  # Mark VPN packets (WireGuard 10.8.0.0/24, L2TP 10.9.0.0/24, OpenVPN 10.10.0.0/24) to go through V2Ray
-  iptables -t mangle -D PREROUTING -s 10.8.0.0/24 -j MARK --set-mark 0x1 2>/dev/null || true
-  iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -j MARK --set-mark 0x1 2>/dev/null || true
-  iptables -t mangle -D PREROUTING -s 10.10.0.0/24 -j MARK --set-mark 0x1 2>/dev/null || true
-
-  iptables -t mangle -A PREROUTING -s 10.8.0.0/24 -j MARK --set-mark 0x1
-  iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -j MARK --set-mark 0x1
-  iptables -t mangle -A PREROUTING -s 10.10.0.0/24 -j MARK --set-mark 0x1
-
-  # Start services
-  systemctl daemon-reload
-  systemctl enable vpn-v2ray-bridge 2>/dev/null
-  systemctl restart vpn-v2ray-bridge 2>/dev/null
+  echo -e "${BLUE}[1/1] Fetching dynamic bridge configuration from local panel...${NC}"
+  curl -s http://127.0.0.1:3000/install-bridge.sh | bash
 
   echo -e "${GREEN}==================================================================${NC}"
   echo -e "${GREEN}  ✅ V2Ray Middle Bridge successfully configured and active!     ${NC}"
-  echo -e "${GREEN}  All WireGuard (10.8.0.0/24), L2TP (10.9.0.0/24) and OpenVPN    ${NC}"
-  echo -e "${GREEN}  connections are now forwarded through the V2Ray upstream tunnel! ${NC}"
   echo -e "${GREEN}==================================================================${NC}"
   echo ""
   read -p "Press Enter to return to main menu..."
