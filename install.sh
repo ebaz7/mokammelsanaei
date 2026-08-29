@@ -477,6 +477,63 @@ EOF
   touch /etc/ppp/chap-secrets
   chmod 600 /etc/ppp/chap-secrets
 
+  echo -e "${BLUE}[4.5/5] Configuring OpenVPN Server...${NC}"
+  mkdir -p /etc/openvpn/server/ccd
+  cd /etc/openvpn/server
+  
+  # Generate certificates if they don't exist
+  if [ ! -f "ca.crt" ]; then
+    echo "Generating OpenVPN Certificates..."
+    openssl ecparam -name prime256v1 -genkey -out ca.key
+    openssl req -x509 -new -key ca.key -out ca.crt -days 3650 -subj "/CN=Sanaei-OpenVPN-CA" -nodes
+    
+    openssl ecparam -name prime256v1 -genkey -out server.key
+    openssl req -new -key server.key -out server.csr -subj "/CN=Sanaei-OpenVPN-Server" -nodes
+    openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 3650
+  fi
+
+  # Create OpenVPN Auth Script
+  cat <<'EOF' > /etc/openvpn/server/auth.sh
+#!/bin/bash
+# Read username and password from file passed by OpenVPN
+USERNAME=$(head -n 1 "$1")
+PASSWORD=$(tail -n 1 "$1")
+# Query local Sanaei Smart Sub API to verify
+STATUS=$(curl -s -X POST http://127.0.0.1:3000/api/auth-vpn -d "username=$USERNAME&password=$PASSWORD" -H "Content-Type: application/x-www-form-urlencoded")
+if [ "$STATUS" = "OK" ]; then
+  exit 0
+else
+  exit 1
+fi
+EOF
+  chmod +x /etc/openvpn/server/auth.sh
+
+  # Configure OpenVPN server
+  cat <<EOF >/etc/openvpn/server/server.conf
+port 1194
+proto udp
+dev tun1
+ca ca.crt
+cert server.crt
+key server.key
+dh none
+topology subnet
+server 10.10.0.0 255.255.255.0
+client-config-dir /etc/openvpn/server/ccd
+ifconfig-pool-persist ipp.txt
+keepalive 10 120
+cipher AES-256-GCM
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+persist-key
+persist-tun
+status openvpn-status.log
+verb 3
+verify-client-cert none
+username-as-common-name
+script-security 3
+auth-user-pass-verify /etc/openvpn/server/auth.sh via-file
+EOF
+
   echo -e "${BLUE}[5/5] Configuring IPTables NAT, MSS Clamping and Starting Services...${NC}"
   # Forwarding rules
   iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
@@ -500,6 +557,8 @@ EOF
   systemctl restart strongswan-starter 2>/dev/null || systemctl restart strongswan 2>/dev/null
   systemctl enable xl2tpd 2>/dev/null
   systemctl restart xl2tpd 2>/dev/null
+  systemctl enable openvpn-server@server 2>/dev/null
+  systemctl restart openvpn-server@server 2>/dev/null
 
   # Sync settings to panel db if present
   if [ -f "/opt/sanaei-smart-sub/data/database.json" ]; then

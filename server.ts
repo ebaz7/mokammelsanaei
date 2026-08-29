@@ -112,22 +112,26 @@ interface DB {
 
 // 100% Valid Standard Self-Signed X.509 Certificate and RSA Key for OpenVPN (Passes OpenSSL/OpenVPN parser)
 const OPENVPN_VALID_CA = `-----BEGIN CERTIFICATE-----
-MIIDRjCCAi6gAwIBAgIUW/fF9GjLqB1v7c3z4e5g6h7i8jkwDQYJKoZIhvcNAQEL
-BQAwFjEUMBIGA1UEAwwLU2FuYWVpLVJPNVQwHhcNMjUwMTAxMDAwMDAwWhcNMzUw
-MTAxMDAwMDAwWjAWMRQwEgYDVQQDDAtTYW5hZWktUk9PVDCCASIwDQYJKoZIhvcN
-AQEBBQADggEPADCCAQoCggEBALy9qO1vN2z4e6r8t9u1v3w5x7y9z1a3b5c7e9g1
-i3k5m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5
-m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9
-q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3
-u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3u5w7
-y9z1AgMBAAGjUzBRMB0GA1UdDgQWBBQy9s8u4k6v3x7y9z1a3b5c7e9g1jAfBgNV
-HSMEGDAWgBQy9s8u4k6v3x7y9z1a3b5c7e9g1jAPBgNVHRMBAf8EBTADAQH/MA0G
-CSqGSIb3DQEBCwUAA4IBAQB3e8f9g1h3j5k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5
-k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5k7m9
-o1q3s5u7w9y1z3a5b7c9e1g3i5k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5k7m9o1q3
-s5u7w9y1z3a5b7c9e1g3i5k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5k7m9o1q3s5u7
-w9y1z3a5b7c9e1g3i5k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5
+MIIBjTCCATOgAwIBAgIUIQIe31/z5nhITVjwyhir6eSRefQwCgYIKoZIzj0EAwIw
+HDEaMBgGA1UEAwwRU2FuYWVpLU9wZW5WUE4tQ0EwHhcNMjYwODI5MTQxOTM5WhcN
+MzYwODI2MTQxOTM5WjAcMRowGAYDVQQDDBFTYW5hZWktT3BlblZQTi1DQTBZMBMG
+ByqGSM49AgEGCCqGSM49AwEHA0IABL2P5tjMPrlrNMmP5KMSKEglsD060bX6bwg/
+hfPg8lmesnO0PE6kmtMhwc2iapZPBLsOm+NCQvIbPv9zwV/3pdKjUzBRMB0GA1Ud
+DgQWBBT2rKEY1n/X9LAvko1PZTcBu05Z3TAfBgNVHSMEGDAWgBT2rKEY1n/X9LAv
+ko1PZTcBu05Z3TAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIQCY
+QwT5y7Vhd9SsFIMIaclfBJO/sdpng/tiHw93G25rWQIgbCIRKx2j00YKgbrq/stE
+B79ZDiZY9oniEIIaXWGbU4Y=
 -----END CERTIFICATE-----`;
+
+function getOpenVPNCert(): string {
+  try {
+    if (fs.existsSync('/etc/openvpn/server/ca.crt')) {
+      return fs.readFileSync('/etc/openvpn/server/ca.crt', 'utf8').trim();
+    }
+  } catch (e) {}
+  return OPENVPN_VALID_CA;
+}
+
 
 function generateWireGuardKeys(): { privateKey: string; publicKey: string } {
   try {
@@ -463,6 +467,18 @@ function syncLocalVpnServices() {
       const fullConf = interfaceSection + peerSection;
       fs.writeFileSync(wgConfPath, fullConf, { mode: 0o600 });
       console.log(`[VPN Sync] /etc/wireguard/wg0.conf successfully synchronized with ${dbData.subscriptions.length} peers.`);
+
+      // 2.5 Sync OpenVPN CCD (Static IPs)
+      const ccdDir = "/etc/openvpn/server/ccd";
+      if (fs.existsSync(ccdDir)) {
+        dbData.subscriptions.forEach((sub, idx) => {
+          if (sub.openvpnUser) {
+            const ovpnIp = `10.10.0.${100 + idx}`;
+            fs.writeFileSync(`${ccdDir}/${sub.openvpnUser}`, `ifconfig-push ${ovpnIp} 255.255.255.0\n`);
+          }
+        });
+        console.log(`[VPN Sync] OpenVPN CCD successfully synchronized.`);
+      }
 
       // Apply the WireGuard configurations dynamically using hot-reload syncconf
       exec("wg syncconf wg0 <(wg-quick strip wg0)", { shell: "/bin/bash" }, (err, stdout, stderr) => {
@@ -3049,7 +3065,10 @@ app.get("/api/sub/:token/wireguard-conf", (req, res) => {
   const { host: serverIp, isBridge } = resolveConnectionHost(req, directServerIp);
   const serverPort = isBridge ? bridgePorts.wgPort : (inbound?.wgPort || inbound?.port || dbData.settings?.wgServerPort || 51820);
   const serverPub = inbound?.wgServerPublicKey || dbData.settings?.wgServerPublicKey || sub.wireguardPublicKey;
-  const clientAddr = isBridge ? bridgePorts.wgClientIp : (sub.wireguardAddress || "10.8.0.2/24");
+  const subIdx = dbData.subscriptions.findIndex((s) => s.id === sub.id);
+  const safeSubIdx = subIdx >= 0 ? subIdx : 0;
+  
+  const clientAddr = isBridge ? `10.8.${safeIdx}.${100 + safeSubIdx}/24` : (sub.wireguardAddress || "10.8.0.2/24");
 
   const wgConf = `# ----------------------------------------------------
 # Sanaei Smart Sub - WireGuard Profile
@@ -3113,15 +3132,11 @@ auth SHA256
 verb 3
 keepalive 10 60
 
-# Inlined User Authentication
+# User Authentication
 auth-user-pass
-<auth-user-pass>
-${sub.openvpnUser}
-${sub.openvpnPass}
-</auth-user-pass>
 
 <ca>
-${OPENVPN_VALID_CA}
+${getOpenVPNCert()}
 </ca>
 `;
 
@@ -3144,8 +3159,24 @@ app.get("/install.sh", (req, res) => {
 
 // Dev vs Production Setup
 async function startServer() {
+// Internal API for VPN Daemon Authentication (OpenVPN / L2TP)
+app.post("/api/auth-vpn", express.urlencoded({ extended: true }), (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    res.status(401).send("FAILED");
+    return;
+  }
+  const sub = dbData.subscriptions.find(s => s.openvpnUser === username && s.openvpnPass === password);
+  if (sub) {
+    res.status(200).send("OK");
+  } else {
+    res.status(401).send("FAILED");
+  }
+});
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
+
       server: { middlewareMode: true },
       appType: "spa",
     });
