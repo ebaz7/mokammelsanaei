@@ -4,6 +4,9 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import dns from "dns";
 
+// Disable SSL certificate verification globally for Node fetch to allow self-signed panel certificates
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+
 // Ensure dns resolution order is stable
 dns.setDefaultResultOrder("ipv4first");
 
@@ -26,6 +29,9 @@ interface Panel {
   isActive: boolean;
   isMock?: boolean;
   webBasePath?: string;
+  workingLoginUrl?: string;
+  workingInboundsUrl?: string;
+  workingContentType?: "form" | "json";
 }
 
 interface SmartSubscription {
@@ -145,45 +151,247 @@ function getPanelApiUrls(url: string, explicitBasePath?: string) {
   };
 }
 
+interface LoginTestResult {
+  loginUrl: string;
+  inboundsUrl: string;
+  cookie: string;
+  contentType: "form" | "json";
+}
+
+async function tryLoginOnCandidates(url: string, webBasePath: string, username: string, password: string): Promise<LoginTestResult> {
+  let cleanUrl = url.replace(/\/$/, "");
+  // Strip trailing "/login" or "/panel" if written in the URL
+  cleanUrl = cleanUrl.replace(/\/login$/, "");
+  cleanUrl = cleanUrl.replace(/\/panel$/, "");
+  
+  const cleanBasePath = (webBasePath || "").trim().replace(/^\//, "").replace(/\/$/, "");
+
+  // Generate unique candidates
+  const candidateUrls: { login: string; inbounds: string }[] = [];
+
+  const addCandidate = (hostUrl: string, path: string) => {
+    const cleanHost = hostUrl.replace(/\/$/, "");
+    const cleanPath = path.trim() ? "/" + path.trim().replace(/^\//, "").replace(/\/$/, "") : "";
+    const login = `${cleanHost}${cleanPath}/login`;
+    const inbounds = `${cleanHost}${cleanPath}/panel/api/inbounds/list`;
+    
+    // Avoid duplicates
+    if (!candidateUrls.some(c => c.login === login)) {
+      candidateUrls.push({ login, inbounds });
+    }
+  };
+
+  // Helper to extract parts from URL
+  let protocol = "https:";
+  let hostname = "";
+  let port = "";
+  let urlPath = "";
+  try {
+    const parsed = new URL(cleanUrl);
+    protocol = parsed.protocol;
+    hostname = parsed.hostname;
+    port = parsed.port;
+    urlPath = parsed.pathname.replace(/\/$/, "");
+  } catch (e) {
+    // Fallback if URL is not fully qualified
+    const match = cleanUrl.match(/^(https?:\/\/)?([^:/]+)(:([0-9]+))?(\/.*)?$/);
+    if (match) {
+      protocol = match[1] || "https:";
+      hostname = match[2];
+      port = match[4] || "";
+      urlPath = match[5] || "";
+    }
+  }
+
+  // 1. Candidate as entered (e.g. url + basePath)
+  addCandidate(cleanUrl, cleanBasePath);
+
+  // 2. Candidate with URL as entered, but no webBasePath
+  addCandidate(cleanUrl, "");
+
+  // 3. Candidate with swapped protocol (http <-> https)
+  const otherProtocol = protocol === "https:" ? "http:" : "https:";
+  const swappedUrl = `${otherProtocol}//${hostname}${port ? ":" + port : ""}${urlPath}`;
+  addCandidate(swappedUrl, cleanBasePath);
+  addCandidate(swappedUrl, "");
+
+  // 4. If URL has a path like "/8090", maybe they meant port 8090 instead of path
+  if (urlPath && /^\/[0-9]+$/.test(urlPath)) {
+    const pathPort = urlPath.substring(1);
+    const directPortUrl1 = `${protocol}//${hostname}:${pathPort}`;
+    addCandidate(directPortUrl1, cleanBasePath);
+    addCandidate(directPortUrl1, "");
+
+    const directPortUrl2 = `${otherProtocol}//${hostname}:${pathPort}`;
+    addCandidate(directPortUrl2, cleanBasePath);
+    addCandidate(directPortUrl2, "");
+  }
+
+  // 5. If port is 8080 and webBasePath is given, what if port is actually 8090?
+  if (port === "8080") {
+    const port8090Url1 = `${protocol}//${hostname}:8090`;
+    addCandidate(port8090Url1, cleanBasePath);
+    addCandidate(port8090Url1, "");
+
+    const port8090Url2 = `${otherProtocol}//${hostname}:8090`;
+    addCandidate(port8090Url2, cleanBasePath);
+    addCandidate(port8090Url2, "");
+  }
+
+  // 6. What if they wrote port 8080/8090 and we try root domain on port 80 or 443
+  const rootUrl1 = `${protocol}//${hostname}`;
+  addCandidate(rootUrl1, cleanBasePath);
+  addCandidate(rootUrl1, "");
+
+  console.log(`[3x-ui Auth] Trying ${candidateUrls.length} different URL/Port variations in parallel...`);
+
+  // Run the candidates in parallel to see which succeeds first
+  const tests = candidateUrls.flatMap((c) => {
+    return [
+      // Test form URL encoding
+      (async (): Promise<LoginTestResult> => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        try {
+          const res = await fetch(c.login, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept": "application/json, text/plain, */*",
+            },
+            body: new URLSearchParams({ username, password }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+          if (res.ok) {
+            const setCookie = res.headers.get("set-cookie");
+            if (setCookie) {
+              return {
+                loginUrl: c.login,
+                inboundsUrl: c.inbounds,
+                cookie: setCookie.split(";")[0],
+                contentType: "form" as const,
+              };
+            }
+          }
+          throw new Error(`Failed with status ${res.status}`);
+        } catch (e: any) {
+          clearTimeout(timeoutId);
+          throw e;
+        }
+      })(),
+      // Test JSON body encoding
+      (async (): Promise<LoginTestResult> => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 6000);
+        try {
+          const res = await fetch(c.login, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept": "application/json, text/plain, */*",
+            },
+            body: JSON.stringify({ username, password }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+          if (res.ok) {
+            const setCookie = res.headers.get("set-cookie");
+            if (setCookie) {
+              return {
+                loginUrl: c.login,
+                inboundsUrl: c.inbounds,
+                cookie: setCookie.split(";")[0],
+                contentType: "json" as const,
+              };
+            }
+          }
+          throw new Error(`Failed with status ${res.status}`);
+        } catch (e: any) {
+          clearTimeout(timeoutId);
+          throw e;
+        }
+      })(),
+    ];
+  });
+
+  try {
+    const successResult = await Promise.any(tests);
+    return successResult;
+  } catch (aggregateError: any) {
+    console.error("[3x-ui Auth] All connection candidates failed.");
+    throw new Error(
+      "ارتباط با هیچ‌یک از آدرس‌ها برقرار نشد. لطفاً پروتکل، آی‌پی، پورت سرور و یوزرنیم/پسورد پنل سنایی خود را بررسی کنید. همچنین مطمئن شوید فایروال سرور پورت را مسدود نکرده است."
+    );
+  }
+}
+
 async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: string): Promise<string[]> {
   if (panel.isMock || panel.url.includes("mock") || panel.url.includes("sanaei.xyz")) {
     return generateMockLinks(username, uuid);
   }
 
   try {
-    const { loginUrl, inboundsUrl, host } = getPanelApiUrls(panel.url, panel.webBasePath);
-    
-    // Authenticate with 3x-ui to get a session cookie
-    const loginRes = await fetch(loginUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        username: panel.username,
-        password: panel.password,
-      }),
-    });
+    let loginUrl = panel.workingLoginUrl;
+    let inboundsUrl = panel.workingInboundsUrl;
+    let contentType = panel.workingContentType || "form";
+    let sessionCookie = "";
 
-    if (!loginRes.ok) {
-      console.warn(`[3x-ui Sync] Login failed for panel ${panel.name}. Status: ${loginRes.status}`);
-      return generateMockLinks(username, uuid);
+    // If we have working URLs, try to login using them first
+    if (loginUrl && inboundsUrl) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        
+        const loginRes = await fetch(loginUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": contentType === "json" ? "application/json" : "application/x-www-form-urlencoded",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+          },
+          body: contentType === "json" 
+            ? JSON.stringify({ username: panel.username, password: panel.password })
+            : new URLSearchParams({ username: panel.username, password: panel.password }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        if (loginRes.ok) {
+          const setCookie = loginRes.headers.get("set-cookie");
+          if (setCookie) {
+            sessionCookie = setCookie.split(";")[0];
+          }
+        }
+      } catch (err) {
+        console.warn(`[3x-ui Sync] Quick login failed for ${panel.name}, will try auto-discovery:`, err);
+      }
     }
 
-    const setCookie = loginRes.headers.get("set-cookie");
-    if (!setCookie) {
-      console.warn(`[3x-ui Sync] No set-cookie header returned from panel ${panel.name}`);
-      return generateMockLinks(username, uuid);
-    }
+    // If quick login failed or we didn't have cached URLs, run discovery
+    if (!sessionCookie) {
+      console.log(`[3x-ui Sync] Running URL auto-discovery for panel ${panel.name}...`);
+      const result = await tryLoginOnCandidates(panel.url, panel.webBasePath || "", panel.username, panel.password);
+      loginUrl = result.loginUrl;
+      inboundsUrl = result.inboundsUrl;
+      contentType = result.contentType;
+      sessionCookie = result.cookie;
 
-    // Extract raw session cookie string
-    const sessionCookie = setCookie.split(";")[0];
+      // Update and cache the successful URLs in database
+      panel.workingLoginUrl = loginUrl;
+      panel.workingInboundsUrl = inboundsUrl;
+      panel.workingContentType = contentType;
+      saveDb();
+    }
 
     // Request active inbounds list
     const inboundsRes = await fetch(inboundsUrl, {
       method: "GET",
       headers: {
         "Cookie": sessionCookie,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       },
     });
 
@@ -193,63 +401,75 @@ async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: str
     }
 
     const data = await inboundsRes.json();
-    if (!data || !data.success || !Array.isArray(data.obj)) {
-      console.warn(`[3x-ui Sync] Invalid list format response from panel ${panel.name}`);
-      return generateMockLinks(username, uuid);
-    }
-
-    const domainOrIp = new URL(host).hostname;
-    const nodes: string[] = [];
-
-    // Map active inbounds from 3x-ui
-    for (const inbound of data.obj) {
-      const port = inbound.port;
-      const protocol = inbound.protocol; // "vless", "vmess", "trojan", "shadowsocks"
-      const settings = typeof inbound.settings === "string" ? JSON.parse(inbound.settings) : inbound.settings;
-      const streamSettings = typeof inbound.streamSettings === "string" ? JSON.parse(inbound.streamSettings) : inbound.streamSettings;
-
-      const network = streamSettings?.network || "tcp";
-      const security = streamSettings?.security || "none";
-      const path = streamSettings?.wsSettings?.path || streamSettings?.grpcSettings?.serviceName || "";
-      const remarks = encodeURIComponent(`${panel.name} - ${protocol.toUpperCase()}-${port}`);
-
-      if (protocol === "vless") {
-        nodes.push(`vless://${uuid}@${domainOrIp}:${port}?type=${network}&security=${security}&path=${encodeURIComponent(path)}#${remarks}`);
-      } else if (protocol === "vmess") {
-        const vmessObj = {
-          v: "2",
-          ps: `${panel.name} - VMESS-${port}`,
-          add: domainOrIp,
-          port: port,
-          id: uuid,
-          aid: "0",
-          scy: "auto",
-          net: network,
-          type: "none",
-          host: domainOrIp,
-          path: path,
-          tls: security === "tls" ? "tls" : "",
-        };
-        nodes.push(`vmess://${Buffer.from(JSON.stringify(vmessObj)).toString("base64")}`);
-      } else if (protocol === "trojan") {
-        nodes.push(`trojan://${uuid}@${domainOrIp}:${port}?security=${security}&sni=${domainOrIp}#${remarks}`);
-      } else if (protocol === "shadowsocks") {
-        const method = settings?.method || "aes-256-gcm";
-        const password = settings?.password || "pass";
-        const ssBase = Buffer.from(`${method}:${password}`).toString("base64");
-        nodes.push(`shadowsocks://${ssBase}@${domainOrIp}:${port}#${remarks}`);
+    if (data && data.success && Array.isArray(data.obj)) {
+      const nodes: string[] = [];
+      
+      // Parse host IP/domain of the panel to construct correct configuration node connection link
+      let panelDomain = "142.250.74.46";
+      try {
+        const urlObj = new URL(panel.url);
+        panelDomain = urlObj.hostname;
+      } catch (e) {
+        // Fallback hostname parsing
+        const match = panel.url.match(/^(https?:\/\/)?([^:/]+)/);
+        if (match) panelDomain = match[2];
       }
-    }
 
-    if (nodes.length > 0) {
-      console.log(`[3x-ui Sync] Successfully synced ${nodes.length} live nodes from panel ${panel.name}`);
-      return nodes;
+      for (const inbound of data.obj) {
+        if (!inbound.enable) continue;
+        const streamSettings = typeof inbound.streamSettings === "string" 
+          ? JSON.parse(inbound.streamSettings) 
+          : inbound.streamSettings;
+        const port = inbound.port;
+        const remark = inbound.remark || `${panel.name} - Node`;
+
+        const protocol = inbound.protocol; // vmess, vless, trojan, shadowsocks
+        const settings = typeof inbound.settings === "string" ? JSON.parse(inbound.settings) : inbound.settings;
+
+        const sni = streamSettings?.tlsSettings?.serverName || streamSettings?.xtlsSettings?.serverName || panelDomain;
+        const security = streamSettings?.security || "none";
+        const pathStr = streamSettings?.wsSettings?.path || streamSettings?.grpcSettings?.serviceName || "";
+        const netType = streamSettings?.network || "tcp";
+
+        if (protocol === "vless") {
+          const flow = settings?.clients?.[0]?.flow || "";
+          nodes.push(
+            `vless://${uuid}@${panelDomain}:${port}?type=${netType}&security=${security}&sni=${sni}&path=${encodeURIComponent(pathStr)}&flow=${flow}#${encodeURIComponent(remark)}`
+          );
+        } else if (protocol === "vmess") {
+          const vmessConfig = {
+            v: "2",
+            ps: remark,
+            add: panelDomain,
+            port: port,
+            id: uuid,
+            aid: "0",
+            scy: "auto",
+            net: netType,
+            type: "none",
+            host: sni,
+            path: pathStr,
+            tls: security === "tls" ? "tls" : "",
+            sni: sni
+          };
+          nodes.push(`vmess://${Buffer.from(JSON.stringify(vmessConfig)).toString("base64")}`);
+        } else if (protocol === "trojan") {
+          nodes.push(
+            `trojan://${uuid}@${panelDomain}:${port}?security=${security}&sni=${sni}&path=${encodeURIComponent(pathStr)}#${encodeURIComponent(remark)}`
+          );
+        } else if (protocol === "shadowsocks") {
+          const method = settings?.method || "aes-256-gcm";
+          const password = settings?.password || "shadowpass";
+          const ssCreds = Buffer.from(`${method}:${password}`).toString("base64");
+          nodes.push(`shadowsocks://${ssCreds}@${panelDomain}:${port}#${encodeURIComponent(remark)}`);
+        }
+      }
+      return nodes.length > 0 ? nodes : generateMockLinks(username, uuid);
     }
   } catch (err: any) {
-    console.error(`[3x-ui Sync] Dynamic sync error for ${panel.name}:`, err.message);
+    console.error(`[3x-ui Sync] Error fetching live nodes from panel ${panel.name}:`, err.message || err);
   }
 
-  // Fallback to mock nodes
   return generateMockLinks(username, uuid);
 }
 
@@ -260,22 +480,48 @@ app.get("/api/panels", (req, res) => {
   res.json(dbData.panels);
 });
 
-app.post("/api/panels", (req, res) => {
+app.post("/api/panels", async (req, res) => {
   const { name, url, username, password, isMock, webBasePath } = req.body;
   if (!name || !url) {
     res.status(400).json({ error: "Name and URL are required" });
     return;
   }
 
+  const cleanUrl = url.replace(/\/$/, "");
+  const cleanWebBasePath = webBasePath || "";
+  const cleanUser = username || "admin";
+  const cleanPass = password || "";
+
+  let workingLoginUrl = "";
+  let workingInboundsUrl = "";
+  let workingContentType: "form" | "json" = "form";
+
+  if (!isMock && !cleanUrl.includes("mock") && !cleanUrl.includes("sanaei.xyz")) {
+    try {
+      const result = await tryLoginOnCandidates(cleanUrl, cleanWebBasePath, cleanUser, cleanPass);
+      workingLoginUrl = result.loginUrl;
+      workingInboundsUrl = result.inboundsUrl;
+      workingContentType = result.contentType;
+    } catch (e) {
+      console.warn("[Register Panel] Connection check failed, defaulting to basic URLs:", e);
+      const defaults = getPanelApiUrls(cleanUrl, cleanWebBasePath);
+      workingLoginUrl = defaults.loginUrl;
+      workingInboundsUrl = defaults.inboundsUrl;
+    }
+  }
+
   const newPanel: Panel = {
     id: "panel-" + Math.random().toString(36).substr(2, 9),
     name,
-    url: url.replace(/\/$/, ""), // Remove trailing slash
-    username: username || "admin",
-    password: password || "",
+    url: cleanUrl,
+    username: cleanUser,
+    password: cleanPass,
     isActive: true,
-    isMock: !!isMock,
-    webBasePath: webBasePath || "",
+    isMock: !!isMock || cleanUrl.includes("mock") || cleanUrl.includes("sanaei.xyz"),
+    webBasePath: cleanWebBasePath,
+    workingLoginUrl,
+    workingInboundsUrl,
+    workingContentType,
   };
 
   dbData.panels.push(newPanel);
@@ -315,36 +561,63 @@ app.post("/api/panels/:id/sync", async (req, res) => {
   } else {
     // Real 3x-ui API Call
     try {
-      const { loginUrl, inboundsUrl } = getPanelApiUrls(panel.url, panel.webBasePath);
-      
-      const loginRes = await fetch(loginUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: new URLSearchParams({
-          username: panel.username,
-          password: panel.password,
-        }),
-      });
+      let loginUrl = panel.workingLoginUrl;
+      let inboundsUrl = panel.workingInboundsUrl;
+      let contentType = panel.workingContentType || "form";
+      let sessionCookie = "";
 
-      if (!loginRes.ok) {
-        res.status(401).json({ error: "Authentication with Sanaei panel failed during sync" });
-        return;
+      // Try quick authenticated login with working URLs first
+      if (loginUrl && inboundsUrl) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 5000);
+          
+          const loginRes = await fetch(loginUrl, {
+            method: "POST",
+            headers: {
+              "Content-Type": contentType === "json" ? "application/json" : "application/x-www-form-urlencoded",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Accept": "application/json, text/plain, */*",
+            },
+            body: contentType === "json" 
+              ? JSON.stringify({ username: panel.username, password: panel.password })
+              : new URLSearchParams({ username: panel.username, password: panel.password }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeoutId);
+
+          if (loginRes.ok) {
+            const setCookie = loginRes.headers.get("set-cookie");
+            if (setCookie) {
+              sessionCookie = setCookie.split(";")[0];
+            }
+          }
+        } catch (e) {
+          console.warn("[Sync API] Quick auth failed, starting auto-discovery:", e);
+        }
       }
 
-      const setCookie = loginRes.headers.get("set-cookie");
-      if (!setCookie) {
-        res.status(500).json({ error: "No session cookie returned from Sanaei panel during sync" });
-        return;
-      }
+      // Run auto-discovery if cached fields are missing or failed
+      if (!sessionCookie) {
+        console.log(`[Sync API] Running URL auto-discovery for panel ${panel.name}...`);
+        const result = await tryLoginOnCandidates(panel.url, panel.webBasePath || "", panel.username, panel.password);
+        loginUrl = result.loginUrl;
+        inboundsUrl = result.inboundsUrl;
+        contentType = result.contentType;
+        sessionCookie = result.cookie;
 
-      const sessionCookie = setCookie.split(";")[0];
+        // Cache the successful results in the DB
+        panel.workingLoginUrl = loginUrl;
+        panel.workingInboundsUrl = inboundsUrl;
+        panel.workingContentType = contentType;
+        saveDb();
+      }
 
       const inboundsRes = await fetch(inboundsUrl, {
         method: "GET",
         headers: {
           "Cookie": sessionCookie,
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         },
       });
 
@@ -463,52 +736,22 @@ app.post("/api/panels/test", async (req, res) => {
   }
 
   try {
-    // Attempt real login request to 3x-ui
-    // 3x-ui login typically responds on /login with x-www-form-urlencoded
-    const { loginUrl } = getPanelApiUrls(url, webBasePath);
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 6000);
-
-    const loginRes = await fetch(loginUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({
-        username: username,
-        password: password,
-      }),
-      signal: controller.signal,
+    // Attempt multi-candidate smart login
+    const result = await tryLoginOnCandidates(url, webBasePath || "", username || "admin", password || "");
+    
+    res.json({
+      success: true,
+      version: "v2.3.8 (Detected)",
+      message: `اتصال هوشمند با موفقیت برقرار شد!\nآدرس فعال شناسایی شده: ${result.loginUrl}\nنوع وب‌سرویس: ${result.contentType === "json" ? "JSON API" : "Form URL-Encoded"}`,
+      workingLoginUrl: result.loginUrl,
+      workingInboundsUrl: result.inboundsUrl,
+      workingContentType: result.contentType,
     });
-    clearTimeout(timeoutId);
-
-    if (loginRes.ok) {
-      res.json({
-        success: true,
-        version: "v2.3.8 (Detected)",
-        message: "Successfully authenticated with MHSanaei 3x-ui panel",
-      });
-    } else {
-      let advice = "";
-      if (loginRes.status === 404) {
-        advice = "آدرس یا پیشوند مسیر اشتباه است. لطفاً آدرس پنل و پیشوند مسیر را بررسی کنید. توجه: در کادر آدرس شما عبارت '/8090' وجود دارد؛ اگر پورت پنل شما 8090 است، باید آدرس را به شکل https://jeimi.namzani.shop:8090 وارد کنید و عبارت اضافی را از ته آدرس بردارید.";
-      } else if (loginRes.status === 401) {
-        advice = "نام کاربری یا رمز عبور پنل سنایی اشتباه است. لطفاً آن را مجدد بررسی کنید.";
-      } else {
-        advice = "پاسخ نامشخص از سرور دریافت شد. پورت یا تنظیمات وب بیس پث را مجدداً چک کنید.";
-      }
-      res.status(400).json({
-        success: false,
-        message: `Authentication failed (Status code: ${loginRes.status})\nURL: ${loginUrl}\nراهنما: ${advice}`,
-      });
-    }
   } catch (err: any) {
     console.error("Test connection failed:", err);
-    const { loginUrl } = getPanelApiUrls(url, webBasePath);
     res.json({
       success: false,
-      message: `اتصال به سرور برقرار نشد (Fetch Error)\nآدرس تست شده: ${loginUrl}\nخطا: ${err.message || "Connection timed out"}\nراهنما: مطمئن شوید پروتکل (http یا https) و پورت پنل درست است و فایروال سرور پورت را نبسته باشد.`,
-      isFallback: true,
+      message: `اتصال به سرور برقرار نشد.\nعلت: ${err.message || "Connection timed out"}\nراهنما: مطمئن شوید آی‌پی/دامنه سرور درست است، پورت پنل باز است و فایروال سرور پورت را نبسته باشد. همچنین یوزرنیم و پسورد پنل را بررسی کنید.`,
     });
   }
 });
