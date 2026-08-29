@@ -74,6 +74,14 @@ export default function App() {
   const [wgServerDnsState, setWgServerDnsState] = useState("1.1.1.1, 8.8.8.8");
   const [isSavingSettings, setIsSavingSettings] = useState(false);
 
+  // Server IP / Domain Management State
+  const [detectedPublicIp, setDetectedPublicIp] = useState("");
+  const [isServerIpModalOpen, setIsServerIpModalOpen] = useState(false);
+  const [quickServerIpInput, setQuickServerIpInput] = useState("");
+  const [isApplyingServerIp, setIsApplyingServerIp] = useState(false);
+  const [applyToAllInboundsCheck, setApplyToAllInboundsCheck] = useState(true);
+  const [applyToAllSubsCheck, setApplyToAllSubsCheck] = useState(true);
+
   // Panels state
   const [panels, setPanels] = useState<Panel[]>([]);
   const [selectedPanel, setSelectedPanel] = useState<string>("");
@@ -155,6 +163,26 @@ export default function App() {
     return inbounds[0];
   };
 
+  // Robust host resolution priority: Inbound server IP -> Global Setting -> Detected Public IP -> Window Hostname -> Fallback
+  const resolveEffectiveHost = (inboundHost?: string, subHost?: string): string => {
+    let host = (inboundHost || subHost || l2tpServerIpState || detectedPublicIp || "").trim();
+    if (!host || host === "127.0.0.1" || host === "142.250.74.46") {
+      if (typeof window !== "undefined" && window.location.hostname && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+        host = window.location.hostname;
+      }
+    }
+    if (!host || host === "142.250.74.46") {
+      const activePanel = panels.find(p => p.id === selectedPanel) || panels[0];
+      if (activePanel && activePanel.url && !activePanel.url.includes("mock") && !activePanel.url.includes("sanaei.xyz")) {
+        try {
+          host = new URL(activePanel.url).hostname;
+        } catch {}
+      }
+    }
+    host = (host || "127.0.0.1").replace(/^https?:\/\//i, "").split("/")[0].split(":")[0].trim();
+    return host;
+  };
+
   // Helper generators for client-side instant profile downloads and QR codes
   const getWireguardConf = (sub: SmartSubscription, customInbound?: InboundNode | null) => {
     if (!sub) return "";
@@ -168,10 +196,7 @@ export default function App() {
     const serverPub = ensureValidWgKey(candidatePub, `srv_pub_${inb?.serverIp || "node1"}`);
     
     // Clean Host/IP
-    let rawHost = inb?.serverIp || sub.l2tpServerIp || (typeof window !== "undefined" ? window.location.hostname : "127.0.0.1");
-    rawHost = rawHost.replace(/^https?:\/\//i, "").split("/")[0].split(":")[0].trim();
-    if (!rawHost || rawHost === "localhost") rawHost = "127.0.0.1";
-    
+    const rawHost = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp);
     const serverPort = inb?.wgPort || inb?.port || wgServerPortState || 51820;
     
     return `[Interface]
@@ -191,8 +216,8 @@ PersistentKeepalive = 25
     if (!sub) return "";
     const inb = customInbound || getActiveInbound();
     const user = sub.username || "user";
-    const serverIp = inb?.serverIp || sub.l2tpServerIp || "127.0.0.1";
-    const psk = inb?.l2tpPsk || sub.l2tpPsk || "SanaeiL2TPSecureKey";
+    const serverIp = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp);
+    const psk = inb?.l2tpPsk || sub.l2tpPsk || l2tpPskState || "SanaeiL2TPSecureKey";
     return `[L2TP_VPN_${user}]
 MEDIA=rastapi
 Port=VPN2-0
@@ -213,8 +238,8 @@ CustomDialFunc=
     const user = sub.username || "user";
     const l2tpUser = sub.l2tpUser || user;
     const l2tpPass = sub.l2tpPass || "password";
-    const serverIp = inb?.serverIp || sub.l2tpServerIp || "127.0.0.1";
-    const psk = inb?.l2tpPsk || sub.l2tpPsk || "SanaeiL2TPSecureKey";
+    const serverIp = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp);
+    const psk = inb?.l2tpPsk || sub.l2tpPsk || l2tpPskState || "SanaeiL2TPSecureKey";
     let pskBase64 = "";
     try {
       pskBase64 = btoa(psk);
@@ -286,7 +311,7 @@ CustomDialFunc=
   const getOpenVpnConfig = (sub: SmartSubscription, customInbound?: InboundNode | null) => {
     if (!sub) return "";
     const inb = customInbound || getActiveInbound();
-    const serverIp = inb?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+    const serverIp = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp);
     const port = inb?.openvpnPort || sub.openvpnPort || 1194;
     const proto = inb?.openvpnProto || sub.openvpnProto || "udp";
     const user = sub.openvpnUser || `vpn_${sub.username || "user"}`;
@@ -378,12 +403,75 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
   const [loadingPanels, setLoadingPanels] = useState(false);
   const [loadingSubs, setLoadingSubs] = useState(false);
 
+  // Fetch public IP from backend auto-discovery
+  const fetchPublicIp = async () => {
+    try {
+      const res = await fetch("/api/server/public-ip");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.publicIp) {
+          setDetectedPublicIp(data.publicIp);
+          if (!l2tpServerIpState && data.settingsIp) {
+            setL2tpServerIpState(data.settingsIp);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Failed to fetch public IP", e);
+    }
+  };
+
+  // Quick Apply Global Server IP / Domain
+  const handleApplyServerIp = async (customIpToApply?: string) => {
+    const targetIp = (customIpToApply || quickServerIpInput || l2tpServerIpState || detectedPublicIp || "").trim();
+    if (!targetIp) {
+      alert(lang === "fa" ? "لطفاً آی‌پی یا دامنه سرور را وارد کنید." : "Please enter server IP or Domain.");
+      return;
+    }
+
+    setIsApplyingServerIp(true);
+    try {
+      const res = await fetch("/api/settings/apply-server-ip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          serverIp: targetIp,
+          applyToAllInbounds: applyToAllInboundsCheck,
+          applyToAllSubs: applyToAllSubsCheck,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setL2tpServerIpState(data.serverIp);
+        setQuickServerIpInput(data.serverIp);
+        setIsServerIpModalOpen(false);
+        await fetchSettings();
+        await fetchInbounds();
+        await fetchSubscriptions();
+        alert(
+          lang === "fa"
+            ? `✅ آی‌پی/دامنه سرور با موفقیت به ${data.serverIp} تغییر یافت و روی تمام کانفیگ‌ها اعمال شد.`
+            : `✅ Server IP/Domain successfully changed to ${data.serverIp} and applied across configs.`
+        );
+      } else {
+        const err = await res.json();
+        alert(err.error || "Failed to apply server IP");
+      }
+    } catch (e: any) {
+      alert(`Error: ${e.message || "Failed to apply IP"}`);
+    } finally {
+      setIsApplyingServerIp(false);
+    }
+  };
+
   // Fetch initial data
   useEffect(() => {
     fetchPanels();
     fetchSubscriptions();
     fetchInbounds();
     fetchSettings();
+    fetchPublicIp();
   }, []);
 
   const fetchInbounds = async () => {
@@ -853,7 +941,38 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3 flex-wrap justify-end">
+            {/* Multi-Node Server IP Badge */}
+            <button
+              onClick={() => {
+                setCurrentTab("inbounds");
+              }}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-indigo-200 bg-indigo-50/80 hover:bg-indigo-100/90 text-indigo-900 text-xs font-semibold transition-all shadow-xs"
+              title={lang === "fa" ? "مشاهده و مدیریت نودها و آی‌پی‌های مجزا" : "Manage multi-server nodes and distinct IPs"}
+              id="server-ip-header-btn"
+            >
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+              <span className="text-[11px] font-bold">
+                {lang === "fa" ? `🌐 نودها: ${inbounds.length} سرور با آی‌پی‌های مجزا` : `🌐 Multi-Node: ${inbounds.length} Distinct IPs`}
+              </span>
+              <span className="bg-indigo-200/70 text-indigo-800 text-[10px] px-1.5 py-0.5 rounded-md font-sans">
+                {lang === "fa" ? "مدیریت نودها" : "Nodes"}
+              </span>
+            </button>
+
+            {/* Quick Global IP Modal Button */}
+            <button
+              onClick={() => {
+                setQuickServerIpInput(l2tpServerIpState || detectedPublicIp || resolveEffectiveHost());
+                setIsServerIpModalOpen(true);
+              }}
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-gray-200 bg-white hover:bg-gray-50 text-gray-700 text-xs font-semibold transition-all shadow-2xs"
+              title={lang === "fa" ? "تنظیم آی‌پی سرور اصلی" : "Configure Master Server IP"}
+            >
+              <Settings className="h-3 w-3 text-gray-500" />
+              <span className="text-[10px]">{lang === "fa" ? "تنظیم آی‌پی اصلی" : "Master IP"}</span>
+            </button>
+
             {/* Feasibility / Architecture Guide button */}
             <button
               onClick={() => setShowFeasibilityModal(true)}
@@ -861,7 +980,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
               id="feasibility-btn"
             >
               <Zap className="h-3.5 w-3.5 text-indigo-600" />
-              <span>{lang === "fa" ? "بررسی فنی و راهنمای کارکرد" : "Architecture & Protocol Guide"}</span>
+              <span>{lang === "fa" ? "بررسی فنی" : "Architecture"}</span>
             </button>
 
             {/* Language Switcher Button */}
@@ -873,17 +992,6 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
               <Globe className="h-3.5 w-3.5" />
               <span>{lang === "fa" ? "English" : "فارسی"}</span>
             </button>
-
-            {/* GitHub/Info indicator */}
-            <a 
-              href="https://github.com/MHSanaei/3x-ui.git" 
-              target="_blank" 
-              rel="noreferrer"
-              className="hidden md:flex items-center gap-1 text-xs text-gray-500 hover:text-gray-900 bg-gray-50 hover:bg-gray-100 py-1.5 px-3 rounded-xl transition-all"
-            >
-              <span>MHSanaei/3x-ui</span>
-              <ExternalLink className="h-3 w-3" />
-            </a>
           </div>
         </div>
       </header>
@@ -2056,13 +2164,22 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           <div className="flex items-center gap-2 flex-wrap">
                             <span className="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
                             <span className="font-bold text-gray-900 text-xs">{inb.tag}</span>
-                            {inb.id.startsWith("3xui-") ? (
+                            {inb.extractedFrom ? (
+                              <span className="text-[9px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full border border-emerald-200" title={inb.extractedFrom}>
+                                🔍 {inb.extractedFrom}
+                              </span>
+                            ) : inb.id.startsWith("3xui-") ? (
                               <span className="text-[9px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full border border-emerald-200">
                                 🌐 {lang === "fa" ? "استخراج‌شده از سنایی" : "Live 3X-UI"}
                               </span>
                             ) : (
                               <span className="text-[9px] bg-slate-100 text-slate-700 font-bold px-2 py-0.5 rounded-full">
                                 ⚙️ {lang === "fa" ? "اینباند دستی" : "Custom"}
+                              </span>
+                            )}
+                            {inb.country && inb.country !== "GL" && (
+                              <span className="text-[9px] bg-blue-50 text-blue-700 font-bold px-2 py-0.5 rounded-full border border-blue-150">
+                                📍 {inb.country}
                               </span>
                             )}
                             {inb.isDefault && (
@@ -2102,8 +2219,8 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                         {/* Inbound Specs Grid */}
                         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] mt-2">
                           <div className="bg-white p-2 rounded-xl border border-gray-150">
-                            <span className="text-gray-400 block text-[8px] font-bold">Server IP</span>
-                            <code className="font-mono text-gray-800 break-all">{inb.serverIp}</code>
+                            <span className="text-gray-400 block text-[8px] font-bold">Server IP / Host</span>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{inb.serverIp}</code>
                           </div>
                           <div className="bg-white p-2 rounded-xl border border-gray-150">
                             <span className="text-gray-400 block text-[8px] font-bold">WireGuard Port</span>
@@ -3602,6 +3719,135 @@ def create_customer_subscription(user_id, username):
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Server IP / Domain Configuration Modal */}
+      {isServerIpModalOpen && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in" id="server-ip-modal">
+          <div className="bg-white rounded-3xl p-6 max-w-lg w-full shadow-2xl border border-gray-100 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-gray-100">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-emerald-50 text-emerald-600">
+                  <Globe className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-gray-900 text-sm">
+                    {lang === "fa" ? "تنظیم آدرس عمومی سرور (IP یا Domain)" : "Configure Server Public IP / Domain"}
+                  </h3>
+                  <p className="text-[11px] text-gray-500">
+                    {lang === "fa" ? "این آدرس در تمامی فایل‌های کانفیگ و اشتراک‌های تولید شده درج می‌شود" : "This host/IP is embedded in all generated WireGuard, OpenVPN and L2TP configs"}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsServerIpModalOpen(false)}
+                className="text-gray-400 hover:text-gray-600 text-lg leading-none"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              <div>
+                <label className="block text-gray-700 font-bold mb-1">
+                  {lang === "fa" ? "آدرس آی‌پی عمومی سرور یا ساب‌دامین اختصاصی:" : "Public Server IP or Domain:"}
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. 185.220.101.5 or vpn.yourdomain.com"
+                    value={quickServerIpInput}
+                    onChange={(e) => setQuickServerIpInput(e.target.value)}
+                    className="flex-1 px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-emerald-500 focus:outline-none transition-all font-mono text-sm"
+                  />
+                  {detectedPublicIp && detectedPublicIp !== quickServerIpInput && (
+                    <button
+                      type="button"
+                      onClick={() => setQuickServerIpInput(detectedPublicIp)}
+                      className="px-3 py-2 rounded-xl bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 text-xs font-semibold whitespace-nowrap"
+                    >
+                      {lang === "fa" ? "درج آی‌پی خودکار" : "Use Auto IP"}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {detectedPublicIp && (
+                <div className="p-3 bg-emerald-50/70 border border-emerald-100 rounded-2xl flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-emerald-800">
+                    <Check className="h-4 w-4 text-emerald-600 shrink-0" />
+                    <span>
+                      {lang === "fa" ? "آی‌پی عمومی شناسایی‌شده سرور VPS شما:" : "Auto-detected VPS Public IP:"}{" "}
+                      <strong className="font-mono">{detectedPublicIp}</strong>
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleApplyServerIp(detectedPublicIp)}
+                    className="text-[11px] font-bold text-emerald-700 hover:underline shrink-0"
+                  >
+                    {lang === "fa" ? "اعمال مستقیم این آی‌پی" : "Apply This IP"}
+                  </button>
+                </div>
+              )}
+
+              <div className="space-y-2 pt-2 border-t border-gray-100">
+                <label className="flex items-center gap-2 cursor-pointer text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={applyToAllInboundsCheck}
+                    onChange={(e) => setApplyToAllInboundsCheck(e.target.checked)}
+                    className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
+                  />
+                  <span>
+                    {lang === "fa" ? "به‌روزرسانی تمام اینباندها با این آدرس جدید" : "Update all Inbounds with this new Server IP/Domain"}
+                  </span>
+                </label>
+
+                <label className="flex items-center gap-2 cursor-pointer text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={applyToAllSubsCheck}
+                    onChange={(e) => setApplyToAllSubsCheck(e.target.checked)}
+                    className="rounded text-emerald-600 focus:ring-emerald-500 h-4 w-4"
+                  />
+                  <span>
+                    {lang === "fa" ? "به‌روزرسانی تمام کانفیگ‌های کاربران موجود" : "Update all existing client subscriptions"}
+                  </span>
+                </label>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setIsServerIpModalOpen(false)}
+                  className="px-4 py-2 rounded-xl border border-gray-200 text-gray-700 hover:bg-gray-50 font-bold transition-all"
+                >
+                  {lang === "fa" ? "انصراف" : "Cancel"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleApplyServerIp()}
+                  disabled={isApplyingServerIp}
+                  className="px-5 py-2 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700 font-bold transition-all shadow-sm flex items-center gap-1.5"
+                >
+                  {isApplyingServerIp ? (
+                    <>
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                      <span>{lang === "fa" ? "در حال اعمال..." : "Applying..."}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="h-3.5 w-3.5" />
+                      <span>{lang === "fa" ? "ذخیره و اعمال همگانی" : "Save & Apply Globally"}</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

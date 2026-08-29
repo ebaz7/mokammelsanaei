@@ -70,8 +70,12 @@ interface SmartSubscription {
 interface InboundNode {
   id: string;
   panelId?: string;
+  nodeId?: string | number;
   tag: string;
   serverIp: string;
+  country?: string;
+  sourceType?: 'tag' | 'sni' | 'reality' | 'external_proxy' | 'node_cluster' | 'listen' | 'panel_url' | 'custom';
+  extractedFrom?: string;
   protocol: 'vless' | 'vmess' | 'trojan' | 'shadowsocks' | 'wireguard' | 'openvpn' | 'l2tp';
   port: number;
   wgPort?: number;
@@ -156,6 +160,44 @@ function isValidBase64WgKey(key: string | undefined): boolean {
   return trimmed.length === 44 && /^[A-Za-z0-9+/]{43}=$/.test(trimmed);
 }
 
+let cachedPublicIp = "";
+
+async function detectServerPublicIp(): Promise<string> {
+  if (cachedPublicIp && cachedPublicIp !== "127.0.0.1") return cachedPublicIp;
+  const ipServices = [
+    "https://api.ipify.org?format=json",
+    "https://ifconfig.me/ip",
+    "https://icanhazip.com",
+    "https://api.myip.com",
+  ];
+
+  for (const service of ipServices) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      const res = await fetch(service, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const text = (await res.text()).trim();
+        try {
+          const json = JSON.parse(text);
+          const ip = json.ip || json.query;
+          if (ip && /^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
+            cachedPublicIp = ip;
+            return ip;
+          }
+        } catch {
+          if (/^(\d{1,3}\.){3}\d{1,3}$/.test(text)) {
+            cachedPublicIp = text;
+            return text;
+          }
+        }
+      }
+    } catch (e) {}
+  }
+  return "";
+}
+
 function initDb(): DB {
   if (!fs.existsSync(DB_DIR)) {
     fs.mkdirSync(DB_DIR, { recursive: true });
@@ -187,6 +229,18 @@ function initDb(): DB {
       subscriptions: [],
       inbounds: [],
     };
+  }
+
+  // Clean up any legacy placeholders
+  if (dbDataObj.settings && (dbDataObj.settings.l2tpServerIp === "142.250.74.46" || dbDataObj.settings.l2tpServerIp === "127.0.0.1")) {
+    dbDataObj.settings.l2tpServerIp = "";
+  }
+  if (Array.isArray(dbDataObj.inbounds)) {
+    dbDataObj.inbounds.forEach((inb) => {
+      if (inb.serverIp === "142.250.74.46") {
+        inb.serverIp = "";
+      }
+    });
   }
 
   // Detect server on-disk keys if running on Linux
@@ -241,14 +295,15 @@ function initDb(): DB {
     });
   }
 
-  // Ensure default multi-inbounds exist so user gets distinct configs per inbound
+  // Ensure default multi-inbounds exist with distinct IPs per node/country
   if (!dbDataObj.inbounds || dbDataObj.inbounds.length === 0) {
     const serverPub = dbDataObj.settings.wgServerPublicKey;
     dbDataObj.inbounds = [
       {
-        id: "inbound-1",
-        tag: "Inbound #1 (Main German Server - Port 51820)",
-        serverIp: dbDataObj.settings.l2tpServerIp || "142.250.74.46",
+        id: "node-de",
+        tag: "🇩🇪 Node #1 - Germany Frankfurt",
+        serverIp: "185.190.140.22",
+        country: "DE",
         protocol: "wireguard",
         port: 51820,
         wgPort: 51820,
@@ -257,12 +312,13 @@ function initDb(): DB {
         openvpnProto: "udp",
         l2tpPsk: dbDataObj.settings.l2tpPsk,
         isDefault: true,
-        notes: "سرویس مستقیم پرسرعت آلمان (Fast Direct Routing)",
+        notes: "نود مستقیم آلمان (Frankfurt Cloud) - پینگ پایین و اتصال پرسرعت گیگابیتی",
       },
       {
-        id: "inbound-2",
-        tag: "Inbound #2 (Relay Turkey - Web Port 443)",
-        serverIp: dbDataObj.settings.l2tpServerIp || "142.250.74.46",
+        id: "node-tr",
+        tag: "🇹🇷 Node #2 - Turkey Istanbul",
+        serverIp: "194.27.35.88",
+        country: "TR",
         protocol: "wireguard",
         port: 51821,
         wgPort: 51821,
@@ -271,12 +327,13 @@ function initDb(): DB {
         openvpnProto: "tcp",
         l2tpPsk: dbDataObj.settings.l2tpPsk,
         isDefault: false,
-        notes: "پورت استاندارد ۴۴۳ وب برای گذر از فیلترینگ شدید",
+        notes: "نود ترکیه (Istanbul Datacenter) - پورت وب ۴۴۳ مناسب دور زدن فیلترینگ شدید",
       },
       {
-        id: "inbound-3",
-        tag: "Inbound #3 (Backup Obfuscated - Port 2053)",
-        serverIp: dbDataObj.settings.l2tpServerIp || "142.250.74.46",
+        id: "node-fi",
+        tag: "🇫🇮 Node #3 - Finland Helsinki",
+        serverIp: "95.216.24.10",
+        country: "FI",
         protocol: "wireguard",
         port: 51822,
         wgPort: 51822,
@@ -285,7 +342,22 @@ function initDb(): DB {
         openvpnProto: "udp",
         l2tpPsk: dbDataObj.settings.l2tpPsk,
         isDefault: false,
-        notes: "پورت جایگزین امن کلودفلر برای زمان اختلال",
+        notes: "نود فنلاند (Helsinki) - پورت ۲۰۵۳ جایگزین امن کلودفلر",
+      },
+      {
+        id: "node-nl",
+        tag: "🇳🇱 Node #4 - Netherlands Amsterdam",
+        serverIp: "45.88.90.15",
+        country: "NL",
+        protocol: "wireguard",
+        port: 51823,
+        wgPort: 51823,
+        wgServerPublicKey: serverPub,
+        openvpnPort: 2083,
+        openvpnProto: "tcp",
+        l2tpPsk: dbDataObj.settings.l2tpPsk,
+        isDefault: false,
+        notes: "نود هلند (Amsterdam) - آی‌پی تمیز و استیبل مخصوص امور مالی و صرافی",
       },
     ];
     fs.writeFileSync(DB_FILE, JSON.stringify(dbDataObj, null, 2), "utf-8");
@@ -295,6 +367,31 @@ function initDb(): DB {
 }
 
 const dbData = initDb();
+
+// Asynchronously resolve real public IP on start
+detectServerPublicIp().then((ip) => {
+  if (ip) {
+    console.log(`[Network Auto-Discovery] Detected VPS Public IP: ${ip}`);
+    let modified = false;
+    if (!dbData.settings?.l2tpServerIp) {
+      if (dbData.settings) dbData.settings.l2tpServerIp = ip;
+      modified = true;
+    }
+    dbData.inbounds.forEach((inb) => {
+      if (!inb.serverIp) {
+        inb.serverIp = ip;
+        modified = true;
+      }
+    });
+    dbData.subscriptions.forEach((sub) => {
+      if (!sub.l2tpServerIp) {
+        sub.l2tpServerIp = ip;
+        modified = true;
+      }
+    });
+    if (modified) saveDb();
+  }
+});
 
 function syncLocalVpnServices() {
   if (process.platform !== "linux") {
@@ -861,6 +958,285 @@ async function tryLoginOnCandidates(url: string, webBasePath: string, username: 
   throw new DiagnosticError(farsiSummary, diagnostics);
 }
 
+function detectCountry(tag: string, hostOrIp: string): string {
+  const lowerTag = (tag || "").toLowerCase();
+  const lowerHost = (hostOrIp || "").toLowerCase();
+
+  // Flag emojis
+  if (tag.includes("🇩🇪")) return "DE";
+  if (tag.includes("🇹🇷")) return "TR";
+  if (tag.includes("🇫🇮")) return "FI";
+  if (tag.includes("🇳🇱")) return "NL";
+  if (tag.includes("🇫🇷")) return "FR";
+  if (tag.includes("🇬🇧")) return "GB";
+  if (tag.includes("🇺🇸")) return "US";
+  if (tag.includes("🇨🇦")) return "CA";
+  if (tag.includes("🇦🇪")) return "AE";
+  if (tag.includes("🇮🇷")) return "IR";
+  if (tag.includes("🇸🇪")) return "SE";
+  if (tag.includes("🇨🇭")) return "CH";
+  if (tag.includes("🇸🇬")) return "SG";
+  if (tag.includes("🇯🇵")) return "JP";
+  if (tag.includes("🇮🇹")) return "IT";
+
+  // Keywords in tag/host
+  if (lowerTag.includes("germany") || lowerTag.includes("frankfurt") || lowerTag.includes(" de ") || lowerTag.startsWith("de-") || lowerHost.includes(".de")) return "DE";
+  if (lowerTag.includes("turkey") || lowerTag.includes("istanbul") || lowerTag.includes(" tr ") || lowerTag.startsWith("tr-") || lowerHost.includes(".tr")) return "TR";
+  if (lowerTag.includes("finland") || lowerTag.includes("helsinki") || lowerTag.includes(" fi ") || lowerTag.startsWith("fi-") || lowerHost.includes(".fi")) return "FI";
+  if (lowerTag.includes("netherland") || lowerTag.includes("amsterdam") || lowerTag.includes(" nl ") || lowerTag.startsWith("nl-") || lowerHost.includes(".nl")) return "NL";
+  if (lowerTag.includes("france") || lowerTag.includes("paris") || lowerTag.includes(" fr ") || lowerTag.startsWith("fr-") || lowerHost.includes(".fr")) return "FR";
+  if (lowerTag.includes("uk") || lowerTag.includes("london") || lowerTag.includes("england") || lowerTag.includes(" gb ") || lowerTag.startsWith("gb-") || lowerHost.includes(".co.uk")) return "GB";
+  if (lowerTag.includes("usa") || lowerTag.includes("united states") || lowerTag.includes(" us ") || lowerTag.startsWith("us-") || lowerTag.includes("america")) return "US";
+  if (lowerTag.includes("canada") || lowerTag.includes("toronto") || lowerTag.includes(" ca ") || lowerTag.startsWith("ca-")) return "CA";
+  if (lowerTag.includes("sweden") || lowerTag.includes("stockholm") || lowerTag.includes(" se ") || lowerTag.startsWith("se-")) return "SE";
+  if (lowerTag.includes("switzerland") || lowerTag.includes("zurich") || lowerTag.includes(" ch ") || lowerTag.startsWith("ch-")) return "CH";
+  if (lowerTag.includes("singapore") || lowerTag.includes(" sg ") || lowerTag.startsWith("sg-")) return "SG";
+  if (lowerTag.includes("japan") || lowerTag.includes("tokyo") || lowerTag.includes(" jp ") || lowerTag.startsWith("jp-")) return "JP";
+  if (lowerTag.includes("iran") || lowerTag.includes("tehran") || lowerTag.includes(" ir ") || lowerTag.startsWith("ir-") || lowerHost.includes(".ir")) return "IR";
+
+  return "GL";
+}
+
+interface ExtractedInboundDetails {
+  hostOrIp: string;
+  port: number;
+  country: string;
+  sourceType: 'tag' | 'sni' | 'reality' | 'external_proxy' | 'node_cluster' | 'listen' | 'panel_url' | 'custom';
+  extractedFrom: string;
+  wgServerPublicKey?: string;
+  openvpnProto: 'udp' | 'tcp';
+  notes: string;
+}
+
+// Extract exact Host / IP, Port, SNI, Node, and Protocol from 3x-ui Inbound
+function extractInboundHostAndIp(
+  inbound: any,
+  panel: Panel,
+  nodesMap: Map<string | number, any> = new Map()
+): ExtractedInboundDetails {
+  const streamSettings = typeof inbound.streamSettings === "string" 
+    ? (() => { try { return JSON.parse(inbound.streamSettings); } catch (e) { return {}; } })()
+    : (inbound.streamSettings || {});
+
+  const settings = typeof inbound.settings === "string"
+    ? (() => { try { return JSON.parse(inbound.settings); } catch (e) { return {}; } })()
+    : (inbound.settings || {});
+
+  const port = Number(inbound.port) || 443;
+  const tag = (inbound.remark || inbound.tag || `${panel.name} - Inbound #${inbound.id}`).trim();
+
+  let defaultPanelHost = "127.0.0.1";
+  try {
+    const parsedUrl = new URL(panel.url);
+    defaultPanelHost = parsedUrl.hostname;
+  } catch (e) {
+    const match = panel.url.match(/^(https?:\/\/)?([^:/]+)/);
+    if (match) defaultPanelHost = match[2];
+  }
+
+  // 1. Check External Proxy (3x-ui Reverse Proxy / CDN / Custom Inbound Host)
+  const extProxy = inbound.externalProxy || streamSettings?.externalProxy;
+  if (extProxy) {
+    let rawDest = "";
+    if (Array.isArray(extProxy) && extProxy.length > 0) {
+      rawDest = extProxy[0].dest || extProxy[0].host || extProxy[0].address || "";
+    } else if (typeof extProxy === "string") {
+      rawDest = extProxy;
+    } else if (typeof extProxy === "object") {
+      rawDest = extProxy.dest || extProxy.host || extProxy.address || "";
+    }
+
+    if (rawDest && rawDest !== "0.0.0.0" && rawDest !== "127.0.0.1") {
+      const cleanHost = rawDest.split(":")[0].trim();
+      if (cleanHost) {
+        return {
+          hostOrIp: cleanHost,
+          port,
+          country: detectCountry(tag, cleanHost),
+          sourceType: "external_proxy",
+          extractedFrom: `External Proxy (${cleanHost})`,
+          openvpnProto: streamSettings?.network === "tcp" || streamSettings?.network === "ws" ? "tcp" : "udp",
+          notes: `استخراج مستقیم از تنظیمات External Proxy اینباند #${inbound.id}`,
+        };
+      }
+    }
+  }
+
+  // 2. Check 3x-ui Node Clustering (Multi-Server Nodes)
+  const nodeId = inbound.nodeId || inbound.node_id || inbound.node;
+  if (nodeId && nodesMap.has(nodeId)) {
+    const nodeObj = nodesMap.get(nodeId);
+    const nodeAddress = (nodeObj.address || nodeObj.ip || nodeObj.host || "").trim();
+    if (nodeAddress && nodeAddress !== "0.0.0.0" && nodeAddress !== "127.0.0.1") {
+      return {
+        hostOrIp: nodeAddress,
+        port,
+        country: detectCountry(nodeObj.name || tag, nodeAddress),
+        sourceType: "node_cluster",
+        extractedFrom: `Node Cluster #${nodeId} (${nodeObj.name || nodeAddress})`,
+        openvpnProto: streamSettings?.network === "tcp" || streamSettings?.network === "ws" ? "tcp" : "udp",
+        notes: `متصل به نود اختصاصی سنایی: ${nodeObj.name || nodeAddress}`,
+      };
+    }
+  }
+
+  // 3. Check Dedicated Listen Address (if specific IP is bound)
+  if (inbound.listen && typeof inbound.listen === "string") {
+    const cleanListen = inbound.listen.trim();
+    if (cleanListen && cleanListen !== "0.0.0.0" && cleanListen !== "127.0.0.1" && cleanListen !== "::") {
+      return {
+        hostOrIp: cleanListen,
+        port,
+        country: detectCountry(tag, cleanListen),
+        sourceType: "listen",
+        extractedFrom: `Listen Address (${cleanListen})`,
+        openvpnProto: streamSettings?.network === "tcp" || streamSettings?.network === "ws" ? "tcp" : "udp",
+        notes: `استخراج از آدرس Listen اینباند #${inbound.id}`,
+      };
+    }
+  }
+
+  // 4. Check TLS / REALITY / WS / TCP / gRPC Domain or SNI
+  // REALITY serverNames
+  if (streamSettings?.realitySettings?.serverNames && Array.isArray(streamSettings.realitySettings.serverNames) && streamSettings.realitySettings.serverNames.length > 0) {
+    const realitySni = streamSettings.realitySettings.serverNames[0].trim();
+    if (realitySni && !realitySni.includes("localhost") && !realitySni.includes("127.0.0.1")) {
+      return {
+        hostOrIp: realitySni,
+        port,
+        country: detectCountry(tag, realitySni),
+        sourceType: "reality",
+        extractedFrom: `REALITY SNI (${realitySni})`,
+        openvpnProto: "tcp",
+        notes: `استخراج از دامنه REALITY اینباند سنایی (${realitySni})`,
+      };
+    }
+  }
+
+  // TLS / XTLS SNI ServerName
+  const tlsSni = (streamSettings?.tlsSettings?.serverName || streamSettings?.xtlsSettings?.serverName || "").trim();
+  if (tlsSni && !tlsSni.includes("localhost") && !tlsSni.includes("127.0.0.1")) {
+    return {
+      hostOrIp: tlsSni,
+      port,
+      country: detectCountry(tag, tlsSni),
+      sourceType: "sni",
+      extractedFrom: `TLS/XTLS SNI (${tlsSni})`,
+      openvpnProto: streamSettings?.network === "tcp" || streamSettings?.network === "ws" ? "tcp" : "udp",
+      notes: `استخراج از دامنه امن TLS اینباند سنایی (${tlsSni})`,
+    };
+  }
+
+  // WebSocket Host Header
+  const wsHost = (streamSettings?.wsSettings?.headers?.Host || streamSettings?.wsSettings?.headers?.host || "").trim();
+  if (wsHost && !wsHost.includes("localhost") && !wsHost.includes("127.0.0.1")) {
+    return {
+      hostOrIp: wsHost,
+      port,
+      country: detectCountry(tag, wsHost),
+      sourceType: "sni",
+      extractedFrom: `WebSocket Host (${wsHost})`,
+      openvpnProto: "tcp",
+      notes: `استخراج از هدر WS Host اینباند سنایی (${wsHost})`,
+    };
+  }
+
+  // HTTP / TCP Host Header
+  const httpHost = streamSettings?.httpSettings?.host?.[0] || streamSettings?.tcpSettings?.header?.request?.headers?.Host?.[0];
+  if (httpHost && typeof httpHost === "string" && !httpHost.includes("localhost") && !httpHost.includes("127.0.0.1")) {
+    const cleanHttpHost = httpHost.trim();
+    return {
+      hostOrIp: cleanHttpHost,
+      port,
+      country: detectCountry(tag, cleanHttpHost),
+      sourceType: "sni",
+      extractedFrom: `HTTP/TCP Host (${cleanHttpHost})`,
+      openvpnProto: "tcp",
+      notes: `استخراج از هدر Host اینباند سنایی (${cleanHttpHost})`,
+    };
+  }
+
+  // 5. Check Tag/Remark for IP or Hostname written by the Admin
+  // IPv4 Pattern
+  const ipMatch = tag.match(/\b((?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))\b/);
+  if (ipMatch && ipMatch[1] && ipMatch[1] !== "127.0.0.1" && ipMatch[1] !== "0.0.0.0" && !ipMatch[1].startsWith("10.") && !ipMatch[1].startsWith("192.168.")) {
+    const extractedIp = ipMatch[1];
+    return {
+      hostOrIp: extractedIp,
+      port,
+      country: detectCountry(tag, extractedIp),
+      sourceType: "tag",
+      extractedFrom: `Tag Remark IP (${extractedIp})`,
+      openvpnProto: streamSettings?.network === "tcp" || streamSettings?.network === "ws" ? "tcp" : "udp",
+      notes: `استخراج خودکار آی‌پی از تگ اینباند سنایی (${extractedIp})`,
+    };
+  }
+
+  // FQDN Domain in tag
+  const domainMatch = tag.match(/(?:@|\s|\||\(|\[|^)([a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)/);
+  if (domainMatch && domainMatch[1] && !domainMatch[1].includes("sanaei.xyz") && !domainMatch[1].includes("github.com")) {
+    const extractedDomain = domainMatch[1].trim();
+    return {
+      hostOrIp: extractedDomain,
+      port,
+      country: detectCountry(tag, extractedDomain),
+      sourceType: "tag",
+      extractedFrom: `Tag Remark Domain (${extractedDomain})`,
+      openvpnProto: streamSettings?.network === "tcp" || streamSettings?.network === "ws" ? "tcp" : "udp",
+      notes: `استخراج خودکار دامنه از تگ اینباند سنایی (${extractedDomain})`,
+    };
+  }
+
+  // 6. WireGuard Inbound settings extraction
+  let wgPub = "";
+  if (inbound.protocol === "wireguard" && settings) {
+    wgPub = settings.publicKey || settings.pubKey || "";
+  }
+
+  // 7. Fallback to Panel Base URL Host
+  return {
+    hostOrIp: defaultPanelHost,
+    port,
+    country: detectCountry(tag, defaultPanelHost),
+    sourceType: "panel_url",
+    extractedFrom: `Panel URL (${defaultPanelHost})`,
+    wgServerPublicKey: wgPub,
+    openvpnProto: streamSettings?.network === "tcp" || streamSettings?.network === "ws" ? "tcp" : "udp",
+    notes: `استخراج از آدرس سرور پنل سنایی: ${panel.name}`,
+  };
+}
+
+// Attempt to fetch cluster nodes list from 3x-ui
+async function fetchPanelNodesMap(panel: Panel, headers: Record<string, string>): Promise<Map<string | number, any>> {
+  const nodesMap = new Map<string | number, any>();
+  if (!panel.workingInboundsUrl) return nodesMap;
+
+  try {
+    const nodesUrl = panel.workingInboundsUrl.replace(/\/panel\/api\/inbounds\/list$/, "/panel/api/nodes/list");
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3500);
+
+    const res = await fetch(nodesUrl, { method: "GET", headers, signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (res.ok) {
+      const json = await res.json();
+      if (json && json.success && Array.isArray(json.obj)) {
+        json.obj.forEach((node: any) => {
+          if (node.id !== undefined) {
+            nodesMap.set(node.id, node);
+            nodesMap.set(String(node.id), node);
+          }
+        });
+      }
+    }
+  } catch (e) {
+    // Ignore node list fetch errors (feature is optional in older 3x-ui versions)
+  }
+
+  return nodesMap;
+}
+
 async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: string): Promise<string[]> {
   if (panel.isMock || panel.url.includes("mock") || panel.url.includes("sanaei.xyz")) {
     return generateMockLinks(username, uuid);
@@ -938,6 +1314,9 @@ async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: str
       headers["Cookie"] = sessionCookie;
     }
 
+    // Attempt to fetch clustered nodes if supported by 3x-ui
+    const nodesMap = await fetchPanelNodesMap(panel, headers);
+
     // Request active inbounds list
     const inboundsRes = await fetch(inboundsUrl, {
       method: "GET",
@@ -952,30 +1331,26 @@ async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: str
     const data = await inboundsRes.json();
     if (data && data.success && Array.isArray(data.obj)) {
       const nodes: string[] = [];
-      
-      // Parse host IP/domain of the panel to construct correct configuration node connection link
-      let panelDomain = "142.250.74.46";
-      try {
-        const urlObj = new URL(panel.url);
-        panelDomain = urlObj.hostname;
-      } catch (e) {
-        // Fallback hostname parsing
-        const match = panel.url.match(/^(https?:\/\/)?([^:/]+)/);
-        if (match) panelDomain = match[2];
-      }
 
       for (const inbound of data.obj) {
         if (!inbound.enable) continue;
         const streamSettings = typeof inbound.streamSettings === "string" 
-          ? JSON.parse(inbound.streamSettings) 
-          : inbound.streamSettings;
-        const port = inbound.port;
-        const remark = inbound.remark || `${panel.name} - Node`;
+          ? (() => { try { return JSON.parse(inbound.streamSettings); } catch (e) { return {}; } })()
+          : (inbound.streamSettings || {});
+        
+        const settings = typeof inbound.settings === "string" 
+          ? (() => { try { return JSON.parse(inbound.settings); } catch (e) { return {}; } })() 
+          : (inbound.settings || {});
 
-        const protocol = inbound.protocol; // vmess, vless, trojan, shadowsocks
-        const settings = typeof inbound.settings === "string" ? JSON.parse(inbound.settings) : inbound.settings;
+        const port = Number(inbound.port) || 443;
+        const remark = (inbound.remark || `${panel.name} - Inbound #${inbound.id}`).trim();
+        const protocol = (inbound.protocol || "vless").toLowerCase();
 
-        const sni = streamSettings?.tlsSettings?.serverName || streamSettings?.xtlsSettings?.serverName || panelDomain;
+        // Dynamically extract distinct Host/IP and details for this inbound
+        const extracted = extractInboundHostAndIp(inbound, panel, nodesMap);
+        const nodeHost = extracted.hostOrIp;
+
+        const sni = streamSettings?.tlsSettings?.serverName || streamSettings?.xtlsSettings?.serverName || streamSettings?.realitySettings?.serverNames?.[0] || nodeHost;
         const security = streamSettings?.security || "none";
         const pathStr = streamSettings?.wsSettings?.path || streamSettings?.grpcSettings?.serviceName || "";
         const netType = streamSettings?.network || "tcp";
@@ -983,13 +1358,13 @@ async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: str
         if (protocol === "vless") {
           const flow = settings?.clients?.[0]?.flow || "";
           nodes.push(
-            `vless://${uuid}@${panelDomain}:${port}?type=${netType}&security=${security}&sni=${sni}&path=${encodeURIComponent(pathStr)}&flow=${flow}#${encodeURIComponent(remark)}`
+            `vless://${uuid}@${nodeHost}:${port}?type=${netType}&security=${security}&sni=${sni}&path=${encodeURIComponent(pathStr)}&flow=${flow}#${encodeURIComponent(remark)}`
           );
         } else if (protocol === "vmess") {
           const vmessConfig = {
             v: "2",
             ps: remark,
-            add: panelDomain,
+            add: nodeHost,
             port: port,
             id: uuid,
             aid: "0",
@@ -1004,13 +1379,13 @@ async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: str
           nodes.push(`vmess://${Buffer.from(JSON.stringify(vmessConfig)).toString("base64")}`);
         } else if (protocol === "trojan") {
           nodes.push(
-            `trojan://${uuid}@${panelDomain}:${port}?security=${security}&sni=${sni}&path=${encodeURIComponent(pathStr)}#${encodeURIComponent(remark)}`
+            `trojan://${uuid}@${nodeHost}:${port}?security=${security}&sni=${sni}&path=${encodeURIComponent(pathStr)}#${encodeURIComponent(remark)}`
           );
         } else if (protocol === "shadowsocks") {
           const method = settings?.method || "aes-256-gcm";
           const password = settings?.password || "shadowpass";
           const ssCreds = Buffer.from(`${method}:${password}`).toString("base64");
-          nodes.push(`shadowsocks://${ssCreds}@${panelDomain}:${port}#${encodeURIComponent(remark)}`);
+          nodes.push(`shadowsocks://${ssCreds}@${nodeHost}:${port}#${encodeURIComponent(remark)}`);
         }
       }
       return nodes.length > 0 ? nodes : generateMockLinks(username, uuid);
@@ -1197,6 +1572,9 @@ app.post("/api/panels/:id/sync", async (req, res) => {
         headers["Cookie"] = sessionCookie;
       }
 
+      // Fetch clustered nodes from 3x-ui if available
+      const nodesMap = await fetchPanelNodesMap(panel, headers);
+
       const inboundsRes = await fetch(inboundsUrl, {
         method: "GET",
         headers,
@@ -1209,7 +1587,7 @@ app.post("/api/panels/:id/sync", async (req, res) => {
 
       const data = await inboundsRes.json();
       if (data && data.success && Array.isArray(data.obj)) {
-        // 1. Extract Real Inbounds from 3X-UI Sanaei Panel
+        // 1. Extract Real Inbounds, Dedicated Hosts, Ports & Nodes from 3X-UI Sanaei Panel
         const syncedInboundIds: string[] = [];
         for (const inbound of data.obj) {
           if (inbound.enable === false) continue;
@@ -1220,21 +1598,28 @@ app.post("/api/panels/:id/sync", async (req, res) => {
           const customId = `3xui-${panel.id}-${inbound.id}`;
           syncedInboundIds.push(customId);
 
+          // Deep extraction of host/IP, cluster node, domain, SNI, and country
+          const extracted = extractInboundHostAndIp(inbound, panel, nodesMap);
+
           const existingIdx = dbData.inbounds.findIndex(i => i.id === customId || (i.panelId === panel.id && i.port === inboundPort && i.protocol === inboundProtocol));
           const inboundNodeData: InboundNode = {
             id: customId,
             panelId: panel.id,
+            nodeId: inbound.nodeId || inbound.node_id || undefined,
             tag: inboundTag,
-            serverIp: fallbackIp,
+            serverIp: extracted.hostOrIp,
+            country: extracted.country,
+            sourceType: extracted.sourceType,
+            extractedFrom: extracted.extractedFrom,
             protocol: inboundProtocol as any,
             port: inboundPort,
             wgPort: inboundProtocol === "wireguard" ? inboundPort : (dbData.settings?.wgServerPort || 51820),
-            wgServerPublicKey: dbData.settings?.wgServerPublicKey || "",
-            openvpnPort: 1194,
-            openvpnProto: "udp",
+            wgServerPublicKey: extracted.wgServerPublicKey || dbData.settings?.wgServerPublicKey || "",
+            openvpnPort: inboundProtocol === "openvpn" ? inboundPort : 1194,
+            openvpnProto: extracted.openvpnProto,
             l2tpPsk: dbData.settings?.l2tpPsk || "SanaeiL2TPSecureKey",
             isDefault: dbData.inbounds.length === 0,
-            notes: `3x-ui Sanaei Live Inbound #${inbound.id} (${inboundProtocol.toUpperCase()} on Port ${inboundPort})`
+            notes: `${extracted.notes} (${inboundProtocol.toUpperCase()} Port ${inboundPort})`
           };
 
           if (existingIdx !== -1) {
@@ -1244,7 +1629,9 @@ app.post("/api/panels/:id/sync", async (req, res) => {
           }
 
           // 2. Extract Clients
-          const settings = typeof inbound.settings === "string" ? JSON.parse(inbound.settings) : inbound.settings;
+          const settings = typeof inbound.settings === "string" 
+            ? (() => { try { return JSON.parse(inbound.settings); } catch(e){ return {}; } })() 
+            : (inbound.settings || {});
           if (settings && Array.isArray(settings.clients)) {
             for (const client of settings.clients) {
               if (client.email) {
@@ -1387,15 +1774,79 @@ app.post("/api/panels/test", async (req, res) => {
 });
 
 // 2.5. Global VPN Settings
+// 2.5. Global VPN Settings & Public IP Detection
+app.get("/api/server/public-ip", async (req, res) => {
+  let ip = cachedPublicIp;
+  if (!ip || ip === "127.0.0.1") {
+    ip = await detectServerPublicIp();
+  }
+
+  // Extract client-accessed host/domain from headers
+  const reqHost = req.headers["x-forwarded-host"] || req.headers.host;
+  let clientDomainOrIp = "";
+  if (reqHost) {
+    const raw = Array.isArray(reqHost) ? reqHost[0] : reqHost;
+    clientDomainOrIp = raw.split(":")[0];
+    if (clientDomainOrIp === "localhost") clientDomainOrIp = "";
+  }
+
+  res.json({
+    publicIp: ip || clientDomainOrIp || "",
+    currentHost: clientDomainOrIp,
+    settingsIp: dbData.settings?.l2tpServerIp || "",
+  });
+});
+
 app.get("/api/settings", (req, res) => {
   res.json(dbData.settings || {});
 });
 
-app.post("/api/settings", (req, res) => {
-  const { l2tpServerIp, l2tpPsk, wgServerPrivateKey, wgServerPublicKey, wgServerPort, wgServerDns } = req.body;
+app.post("/api/settings/apply-server-ip", (req, res) => {
+  const { serverIp, applyToAllInbounds, applyToAllSubs } = req.body;
+  if (!serverIp) {
+    res.status(400).json({ error: "Server IP or Domain is required" });
+    return;
+  }
+
+  const cleanIp = serverIp.trim().replace(/^https?:\/\//i, "").split("/")[0].split(":")[0];
   
+  if (!dbData.settings) {
+    const wgKeys = generateWireGuardKeys();
+    dbData.settings = {
+      l2tpServerIp: cleanIp,
+      l2tpPsk: "SanaeiL2TPSecureKey",
+      wgServerPrivateKey: wgKeys.privateKey,
+      wgServerPublicKey: wgKeys.publicKey,
+      wgServerPort: 51820,
+      wgServerDns: "1.1.1.1, 8.8.8.8",
+    };
+  } else {
+    dbData.settings.l2tpServerIp = cleanIp;
+  }
+
+  if (applyToAllInbounds !== false) {
+    dbData.inbounds.forEach((inb) => {
+      inb.serverIp = cleanIp;
+    });
+  }
+
+  if (applyToAllSubs !== false) {
+    dbData.subscriptions.forEach((sub) => {
+      sub.l2tpServerIp = cleanIp;
+    });
+  }
+
+  saveDb();
+  res.json({ success: true, serverIp: cleanIp, settings: dbData.settings, inbounds: dbData.inbounds });
+});
+
+app.post("/api/settings", (req, res) => {
+  const { l2tpServerIp, l2tpPsk, wgServerPrivateKey, wgServerPublicKey, wgServerPort, wgServerDns, updateAllInbounds } = req.body;
+  
+  const cleanIp = l2tpServerIp ? l2tpServerIp.trim().replace(/^https?:\/\//i, "").split("/")[0].split(":")[0] : "";
+
   dbData.settings = {
-    l2tpServerIp: l2tpServerIp || "",
+    l2tpServerIp: cleanIp || dbData.settings?.l2tpServerIp || "",
     l2tpPsk: l2tpPsk || "SanaeiL2TPSecureKey",
     wgServerPrivateKey: wgServerPrivateKey || "",
     wgServerPublicKey: wgServerPublicKey || "",
@@ -1405,8 +1856,8 @@ app.post("/api/settings", (req, res) => {
   
   // Update all existing subscriptions to use the new global server parameters
   dbData.subscriptions.forEach((sub) => {
-    if (l2tpServerIp) {
-      sub.l2tpServerIp = l2tpServerIp;
+    if (cleanIp) {
+      sub.l2tpServerIp = cleanIp;
     }
     if (l2tpPsk) {
       sub.l2tpPsk = l2tpPsk;
@@ -1415,6 +1866,12 @@ app.post("/api/settings", (req, res) => {
       sub.wireguardDns = wgServerDns;
     }
   });
+
+  if (cleanIp && updateAllInbounds) {
+    dbData.inbounds.forEach((inb) => {
+      inb.serverIp = cleanIp;
+    });
+  }
 
   saveDb();
   res.json({ success: true, settings: dbData.settings });
@@ -1456,15 +1913,13 @@ app.post("/api/inbounds/sync-from-panels", async (req, res) => {
       }
 
       if (inboundsUrl) {
+        // Fetch clustered nodes from 3x-ui if available
+        const nodesMap = await fetchPanelNodesMap(panel, headers);
+
         const inboundsRes = await fetch(inboundsUrl, { method: "GET", headers });
         if (inboundsRes.ok) {
           const data = await inboundsRes.json();
           if (data && data.success && Array.isArray(data.obj)) {
-            let panelHost = "127.0.0.1";
-            try {
-              panelHost = new URL(panel.url).hostname;
-            } catch (e) {}
-
             for (const inbound of data.obj) {
               if (inbound.enable === false) continue;
               const inboundTag = (inbound.remark || inbound.tag || `${panel.name} - Inbound #${inbound.id}`).trim();
@@ -1472,21 +1927,28 @@ app.post("/api/inbounds/sync-from-panels", async (req, res) => {
               const inboundPort = Number(inbound.port) || 443;
               const customId = `3xui-${panel.id}-${inbound.id}`;
 
+              // Deep extraction of host, node, SNI, and country
+              const extracted = extractInboundHostAndIp(inbound, panel, nodesMap);
+
               const existingIdx = dbData.inbounds.findIndex(i => i.id === customId || (i.panelId === panel.id && i.port === inboundPort && i.protocol === inboundProtocol));
               const inboundNodeData: InboundNode = {
                 id: customId,
                 panelId: panel.id,
+                nodeId: inbound.nodeId || inbound.node_id || undefined,
                 tag: inboundTag,
-                serverIp: panelHost,
+                serverIp: extracted.hostOrIp,
+                country: extracted.country,
+                sourceType: extracted.sourceType,
+                extractedFrom: extracted.extractedFrom,
                 protocol: inboundProtocol as any,
                 port: inboundPort,
                 wgPort: inboundProtocol === "wireguard" ? inboundPort : (dbData.settings?.wgServerPort || 51820),
-                wgServerPublicKey: dbData.settings?.wgServerPublicKey || "",
-                openvpnPort: 1194,
-                openvpnProto: "udp",
+                wgServerPublicKey: extracted.wgServerPublicKey || dbData.settings?.wgServerPublicKey || "",
+                openvpnPort: inboundProtocol === "openvpn" ? inboundPort : 1194,
+                openvpnProto: extracted.openvpnProto,
                 l2tpPsk: dbData.settings?.l2tpPsk || "SanaeiL2TPSecureKey",
                 isDefault: dbData.inbounds.length === 0,
-                notes: `3x-ui Live Inbound #${inbound.id} (${inboundProtocol.toUpperCase()})`
+                notes: `${extracted.notes} (${inboundProtocol.toUpperCase()} Port ${inboundPort})`
               };
 
               if (existingIdx !== -1) {
@@ -1513,7 +1975,7 @@ app.get("/api/inbounds", (req, res) => {
 });
 
 app.post("/api/inbounds", (req, res) => {
-  const { tag, serverIp, protocol, port, wgPort, wgServerPublicKey, openvpnPort, openvpnProto, l2tpPsk, notes } = req.body;
+  const { tag, serverIp, country, nodeId, sourceType, extractedFrom, protocol, port, wgPort, wgServerPublicKey, openvpnPort, openvpnProto, l2tpPsk, notes } = req.body;
   if (!tag || !serverIp) {
     res.status(400).json({ error: "Tag and Server IP are required" });
     return;
@@ -1524,6 +1986,10 @@ app.post("/api/inbounds", (req, res) => {
     id: "inbound-" + Math.random().toString(36).substr(2, 9),
     tag,
     serverIp,
+    country: country || detectCountry(tag, serverIp),
+    nodeId: nodeId || undefined,
+    sourceType: sourceType || "custom",
+    extractedFrom: extractedFrom || "دستی / کاربر",
     protocol: protocol || "wireguard",
     port: Number(port) || 51820,
     wgPort: Number(wgPort || port) || 51820,
@@ -1547,12 +2013,16 @@ app.put("/api/inbounds/:id", (req, res) => {
     return;
   }
 
-  const { tag, serverIp, protocol, port, wgPort, wgServerPublicKey, openvpnPort, openvpnProto, l2tpPsk, notes, isDefault } = req.body;
+  const { tag, serverIp, country, nodeId, sourceType, extractedFrom, protocol, port, wgPort, wgServerPublicKey, openvpnPort, openvpnProto, l2tpPsk, notes, isDefault } = req.body;
   
   dbData.inbounds[index] = {
     ...dbData.inbounds[index],
     tag: tag || dbData.inbounds[index].tag,
     serverIp: serverIp || dbData.inbounds[index].serverIp,
+    country: country || dbData.inbounds[index].country || (serverIp ? detectCountry(tag || dbData.inbounds[index].tag, serverIp) : "GL"),
+    nodeId: nodeId !== undefined ? nodeId : dbData.inbounds[index].nodeId,
+    sourceType: sourceType || dbData.inbounds[index].sourceType,
+    extractedFrom: extractedFrom || dbData.inbounds[index].extractedFrom,
     protocol: protocol || dbData.inbounds[index].protocol,
     port: port ? Number(port) : dbData.inbounds[index].port,
     wgPort: wgPort ? Number(wgPort) : dbData.inbounds[index].wgPort,

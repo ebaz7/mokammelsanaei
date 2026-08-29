@@ -15,8 +15,12 @@ export interface Panel {
 
 export interface InboundNode {
   id: string;
+  panelId?: string;
+  nodeId?: number | string;
   tag: string;
   serverIp: string;
+  country?: string;
+  ping?: number;
   protocol: 'vless' | 'vmess' | 'trojan' | 'shadowsocks' | 'wireguard' | 'openvpn' | 'l2tp';
   port: number;
   wgPort?: number;
@@ -26,6 +30,8 @@ export interface InboundNode {
   l2tpPsk?: string;
   isDefault?: boolean;
   notes?: string;
+  sourceType?: 'tag' | 'sni' | 'reality' | 'external_proxy' | 'node_cluster' | 'listen' | 'panel_url' | 'custom';
+  extractedFrom?: string;
 }
 
 export interface SmartSubscription {

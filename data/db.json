@@ -1,0 +1,92 @@
+{
+  "panels": [
+    {
+      "id": "mock-panel",
+      "name": "Sanaei Demo Panel (Simulated)",
+      "url": "http://demo-xui.sanaei.xyz",
+      "username": "admin",
+      "password": "admin_password",
+      "isActive": true,
+      "isMock": true
+    }
+  ],
+  "subscriptions": [],
+  "settings": {
+    "l2tpServerIp": "34.96.49.207",
+    "l2tpPsk": "SanaeiL2TPSecureKey",
+    "wgServerPrivateKey": "+KVDWeuIFeb09ocMe6TqlmIb8C6MPVKVi15Vu1wse14=",
+    "wgServerPublicKey": "IfS+XiiYNzXeUCQHYueG87ElIpiugMuglSTkwHgeMlw=",
+    "wgServerPort": 51820,
+    "wgServerDns": "1.1.1.1, 8.8.8.8"
+  },
+  "inbounds": [
+    {
+      "id": "node-de",
+      "tag": "🇩🇪 Node #1 - Germany Frankfurt",
+      "serverIp": "185.190.140.22",
+      "country": "DE",
+      "sourceType": "tag",
+      "extractedFrom": "Inbound #1 (Germany Frankfurt)",
+      "protocol": "wireguard",
+      "port": 51820,
+      "wgPort": 51820,
+      "wgServerPublicKey": "IfS+XiiYNzXeUCQHYueG87ElIpiugMuglSTkwHgeMlw=",
+      "openvpnPort": 1194,
+      "openvpnProto": "udp",
+      "l2tpPsk": "SanaeiL2TPSecureKey",
+      "isDefault": true,
+      "notes": "نود مستقیم آلمان (Frankfurt Cloud) - پینگ پایین و اتصال پرسرعت گیگابیتی"
+    },
+    {
+      "id": "node-tr",
+      "tag": "🇹🇷 Node #2 - Turkey Istanbul",
+      "serverIp": "194.27.35.88",
+      "country": "TR",
+      "sourceType": "tag",
+      "extractedFrom": "Inbound #2 (Turkey Istanbul)",
+      "protocol": "wireguard",
+      "port": 51821,
+      "wgPort": 51821,
+      "wgServerPublicKey": "IfS+XiiYNzXeUCQHYueG87ElIpiugMuglSTkwHgeMlw=",
+      "openvpnPort": 443,
+      "openvpnProto": "tcp",
+      "l2tpPsk": "SanaeiL2TPSecureKey",
+      "isDefault": false,
+      "notes": "نود ترکیه (Istanbul Datacenter) - پورت وب ۴۴۳ مناسب دور زدن فیلترینگ شدید"
+    },
+    {
+      "id": "node-fi",
+      "tag": "🇫🇮 Node #3 - Finland Helsinki",
+      "serverIp": "95.216.24.10",
+      "country": "FI",
+      "sourceType": "tag",
+      "extractedFrom": "Inbound #3 (Finland Helsinki)",
+      "protocol": "wireguard",
+      "port": 51822,
+      "wgPort": 51822,
+      "wgServerPublicKey": "IfS+XiiYNzXeUCQHYueG87ElIpiugMuglSTkwHgeMlw=",
+      "openvpnPort": 8443,
+      "openvpnProto": "udp",
+      "l2tpPsk": "SanaeiL2TPSecureKey",
+      "isDefault": false,
+      "notes": "نود فنلاند (Helsinki) - پورت ۲۰۵۳ جایگزین امن کلودفلر"
+    },
+    {
+      "id": "node-nl",
+      "tag": "🇳🇱 Node #4 - Netherlands Amsterdam",
+      "serverIp": "45.88.90.15",
+      "country": "NL",
+      "sourceType": "tag",
+      "extractedFrom": "Inbound #4 (Netherlands Amsterdam)",
+      "protocol": "wireguard",
+      "port": 51823,
+      "wgPort": 51823,
+      "wgServerPublicKey": "IfS+XiiYNzXeUCQHYueG87ElIpiugMuglSTkwHgeMlw=",
+      "openvpnPort": 2083,
+      "openvpnProto": "tcp",
+      "l2tpPsk": "SanaeiL2TPSecureKey",
+      "isDefault": false,
+      "notes": "نود هلند (Amsterdam) - آی‌پی تمیز و استیبل مخصوص امور مالی و صرافی"
+    }
+  ]
+}
