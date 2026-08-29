@@ -57,14 +57,8 @@ install_service() {
 
   mkdir -p "$INSTALL_DIR"
   
-  # For demonstration, we create package.json and copy source files.
-  # In a live setup, this would clone the git repo:
-  # git clone https://github.com/your-username/sanaei-smart-sub.git "$INSTALL_DIR"
-  
-  echo -e "${YELLOW}Downloading/Installing application repository...${NC}"
-  # Here we assume the source is packed or cloned
-  cp -r . "$INSTALL_DIR" 2>/dev/null || tar -czf - . | (cd "$INSTALL_DIR" && tar -xzf -)
-
+  echo -e "${YELLOW}Downloading and cloning the application repository...${NC}"
+  git clone https://github.com/ebaz7/mokammelsanaei.git "$INSTALL_DIR"
   cd "$INSTALL_DIR" || exit
 
   echo -e "${BLUE}[3/5] Installing package dependencies...${NC}"
@@ -123,7 +117,7 @@ update_service() {
   systemctl stop ${SERVICE_NAME}
 
   echo -e "${BLUE}Pulling updates and rebuilding...${NC}"
-  # git pull
+  git pull origin main || git pull origin master
   npm install
   npm run build
 
