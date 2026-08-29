@@ -34,8 +34,17 @@ export default function App() {
   // Localization state (fa = Persian, en = English)
   const [lang, setLang] = useState<"fa" | "en">("fa");
 
-  // App major views: 'dashboard', 'panels', 'add-user', 'manuals', 'converter'
-  const [currentTab, setCurrentTab] = useState<"dashboard" | "panels" | "manuals" | "converter">("dashboard");
+  // App major views: 'dashboard', 'panels', 'add-user', 'manuals', 'converter', 'settings'
+  const [currentTab, setCurrentTab] = useState<"dashboard" | "panels" | "manuals" | "converter" | "settings">("dashboard");
+
+  // Global VPN Settings state
+  const [l2tpServerIpState, setL2tpServerIpState] = useState("");
+  const [l2tpPskState, setL2tpPskState] = useState("");
+  const [wgServerPrivateKeyState, setWgServerPrivateKeyState] = useState("");
+  const [wgServerPublicKeyState, setWgServerPublicKeyState] = useState("");
+  const [wgServerPortState, setWgServerPortState] = useState(51820);
+  const [wgServerDnsState, setWgServerDnsState] = useState("1.1.1.1, 8.8.8.8");
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
 
   // Panels state
   const [panels, setPanels] = useState<Panel[]>([]);
@@ -108,7 +117,56 @@ export default function App() {
   useEffect(() => {
     fetchPanels();
     fetchSubscriptions();
+    fetchSettings();
   }, []);
+
+  const fetchSettings = async () => {
+    try {
+      const res = await fetch("/api/settings");
+      if (res.ok) {
+        const data = await res.json();
+        setL2tpServerIpState(data.l2tpServerIp || "");
+        setL2tpPskState(data.l2tpPsk || "");
+        setWgServerPrivateKeyState(data.wgServerPrivateKey || "");
+        setWgServerPublicKeyState(data.wgServerPublicKey || "");
+        setWgServerPortState(data.wgServerPort || 51820);
+        setWgServerDnsState(data.wgServerDns || "1.1.1.1, 8.8.8.8");
+      }
+    } catch (e) {
+      console.error("Failed to load global VPN settings", e);
+    }
+  };
+
+  const handleSaveSettings = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingSettings(true);
+    try {
+      const res = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          l2tpServerIp: l2tpServerIpState,
+          l2tpPsk: l2tpPskState,
+          wgServerPrivateKey: wgServerPrivateKeyState,
+          wgServerPublicKey: wgServerPublicKeyState,
+          wgServerPort: wgServerPortState,
+          wgServerDns: wgServerDnsState,
+        }),
+      });
+      if (res.ok) {
+        alert(lang === "fa" ? "تنظیمات VPN با موفقیت ذخیره و همگام‌سازی شد." : "VPN settings successfully saved and synced.");
+        fetchSettings();
+        fetchSubscriptions();
+      } else {
+        alert("Failed to save settings");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Error saving settings");
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
 
   const fetchPanels = async () => {
     setLoadingPanels(true);
@@ -426,7 +484,7 @@ export default function App() {
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8">
         
         {/* Navigation Tabs */}
-        <div className="flex flex-wrap items-center gap-1 p-1 bg-gray-100 rounded-2xl max-w-lg mb-8" id="main-tabs">
+        <div className="flex flex-wrap items-center gap-1 p-1 bg-gray-100 rounded-2xl max-w-2xl mb-8" id="main-tabs">
           <button
             onClick={() => setCurrentTab("dashboard")}
             className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
@@ -461,6 +519,18 @@ export default function App() {
           >
             <Sliders className="h-4 w-4" />
             {lang === "fa" ? "مبدل لینک" : "L2TP Porter"}
+          </button>
+
+          <button
+            onClick={() => setCurrentTab("settings")}
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+              currentTab === "settings"
+                ? "bg-white text-gray-900 shadow-sm"
+                : "text-gray-500 hover:text-gray-900 hover:bg-white/50"
+            }`}
+          >
+            <Settings className="h-4 w-4" />
+            {lang === "fa" ? "تنظیمات VPN" : "VPN Settings"}
           </button>
 
           <button
@@ -1518,6 +1588,235 @@ export default function App() {
                 </div>
               )}
 
+            </div>
+          </div>
+        )}
+
+        {/* ==================== TAB 5: VPN SETTINGS ==================== */}
+        {currentTab === "settings" && (
+          <div className="max-w-4xl mx-auto space-y-8">
+            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 space-y-6">
+              <div className="flex items-center gap-2 border-b border-gray-100 pb-4">
+                <Settings className="h-5 w-5 text-[#4F46E5]" />
+                <div>
+                  <h3 className="text-sm font-bold text-gray-900">
+                    {lang === "fa" ? "تنظیمات زیرساخت VPN واقعی (L2TP & WireGuard)" : "Real VPN Infrastructure Settings"}
+                  </h3>
+                  <p className="text-[10px] text-gray-500 mt-0.5">
+                    {lang === "fa" 
+                      ? "تنظیمات سرور، کلیدهای عمومی/خصوصی رمزنگاری شده و هماهنگ‌سازی محلی سرور را مدیریت کنید." 
+                      : "Configure your server IP, cryptographic keypairs, and handle direct local synchronization."}
+                  </p>
+                </div>
+              </div>
+
+              <form onSubmit={handleSaveSettings} className="space-y-6">
+                
+                {/* L2TP Settings Section */}
+                <div className="space-y-4">
+                  <h4 className="text-xs font-bold text-gray-900 border-r-2 border-[#4F46E5] pr-2">
+                    {lang === "fa" ? "۱. تنظیمات سرور L2TP / IPsec" : "1. L2TP / IPsec Server Parameters"}
+                  </h4>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                        {lang === "fa" ? "آدرس آی‌پی عمومی سرور یا دامنه" : "Public Server IP or Domain"}
+                      </label>
+                      <input
+                        type="text"
+                        value={l2tpServerIpState}
+                        onChange={(e) => setL2tpServerIpState(e.target.value)}
+                        placeholder="e.g. 195.85.15.20"
+                        className="w-full bg-gray-50 border border-gray-100 rounded-xl px-3 py-2 text-xs font-mono focus:bg-white focus:ring-1 focus:ring-[#4F46E5] transition-all"
+                      />
+                      <p className="text-[9px] text-gray-400 mt-1">
+                        {lang === "fa" ? "آدرس آی‌پی عمومی این سرور که کاربران به آن متصل خواهند شد." : "The public address of this server that clients will connect to."}
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                        {lang === "fa" ? "کلید پیش‌مشترک IPsec (PSK)" : "IPsec Pre-Shared Key (PSK)"}
+                      </label>
+                      <input
+                        type="text"
+                        value={l2tpPskState}
+                        onChange={(e) => setL2tpPskState(e.target.value)}
+                        placeholder="SanaeiL2TPSecureKey"
+                        className="w-full bg-gray-50 border border-gray-100 rounded-xl px-3 py-2 text-xs font-mono focus:bg-white focus:ring-1 focus:ring-[#4F46E5] transition-all"
+                      />
+                      <p className="text-[9px] text-gray-400 mt-1">
+                        {lang === "fa" ? "کلید امنیتی اتصال IPsec متصل به L2TP." : "The IPSec pre-shared secret key configured on the L2TP daemon."}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* WireGuard Settings Section */}
+                <div className="space-y-4 pt-4 border-t border-gray-100">
+                  <h4 className="text-xs font-bold text-gray-900 border-r-2 border-green-500 pr-2">
+                    {lang === "fa" ? "۲. تنظیمات سرور WireGuard" : "2. WireGuard Server Parameters"}
+                  </h4>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                        {lang === "fa" ? "کلید عمومی سرور (Server Public Key)" : "Server Public Key (S_pub)"}
+                      </label>
+                      <input
+                        type="text"
+                        value={wgServerPublicKeyState}
+                        onChange={(e) => setWgServerPublicKeyState(e.target.value)}
+                        placeholder="Server Public Key"
+                        className="w-full bg-gray-50 border border-gray-100 rounded-xl px-3 py-2 text-xs font-mono focus:bg-white focus:ring-1 focus:ring-[#4F46E5] transition-all"
+                      />
+                      <p className="text-[9px] text-gray-400 mt-1">
+                        {lang === "fa" 
+                          ? "کلید عمومی که در فایل‌های .conf دانلود شده توسط کلاینت‌ها قرار می‌گیرد." 
+                          : "This public key will be written as the Peer PublicKey in downloaded client configs."}
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                        {lang === "fa" ? "کلید خصوصی سرور (Server Private Key)" : "Server Private Key (S_priv)"}
+                      </label>
+                      <input
+                        type="text"
+                        value={wgServerPrivateKeyState}
+                        onChange={(e) => setWgServerPrivateKeyState(e.target.value)}
+                        placeholder="Server Private Key"
+                        className="w-full bg-gray-50 border border-gray-100 rounded-xl px-3 py-2 text-xs font-mono focus:bg-white focus:ring-1 focus:ring-[#4F46E5] transition-all"
+                      />
+                      <p className="text-[9px] text-gray-400 mt-1">
+                        {lang === "fa" 
+                          ? "کلید خصوصی سرور جهت بازنویسی و اعمال محلی در فایل wg0.conf" 
+                          : "Used locally to initialize and populate wg0.conf for local connections."}
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                        {lang === "fa" ? "پورت گوش دادن (Listen Port)" : "Listen Port"}
+                      </label>
+                      <input
+                        type="number"
+                        value={wgServerPortState}
+                        onChange={(e) => setWgServerPortState(Number(e.target.value))}
+                        className="w-full bg-gray-50 border border-gray-100 rounded-xl px-3 py-2 text-xs font-mono focus:bg-white focus:ring-1 focus:ring-[#4F46E5] transition-all"
+                      />
+                      <p className="text-[9px] text-gray-400 mt-1">
+                        {lang === "fa" ? "پورت پیش‌فرض سرویس وایرگارد (معمولا ۵۱۸۲۰)" : "Default UDP port for WireGuard service (usually 51820)."}
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-gray-700 mb-1">
+                        {lang === "fa" ? "آدرس‌های DNS کلاینت" : "Client DNS Servers"}
+                      </label>
+                      <input
+                        type="text"
+                        value={wgServerDnsState}
+                        onChange={(e) => setWgServerDnsState(e.target.value)}
+                        placeholder="1.1.1.1, 8.8.8.8"
+                        className="w-full bg-gray-50 border border-gray-100 rounded-xl px-3 py-2 text-xs font-mono focus:bg-white focus:ring-1 focus:ring-[#4F46E5] transition-all"
+                      />
+                      <p className="text-[9px] text-gray-400 mt-1">
+                        {lang === "fa" ? "آدرس‌های دی‌ان‌اس که به کلاینت تزریق می‌شوند تا اتصال فیلتر نباشد." : "DNS server addresses pushed into client configurations."}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-4">
+                  <button
+                    type="submit"
+                    disabled={isSavingSettings}
+                    className="w-full bg-[#4F46E5] text-white py-2.5 px-4 rounded-xl text-xs font-bold hover:bg-[#4338CA] transition-all flex items-center justify-center gap-2 shadow-md hover:shadow-lg disabled:opacity-50"
+                  >
+                    {isSavingSettings ? (
+                      <>
+                        <RefreshCw className="h-4 w-4 animate-spin" />
+                        <span>{lang === "fa" ? "در حال ذخیره‌سازی و اعمال..." : "Saving & Hot-reloading..."}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Check className="h-4 w-4 stroke-[3px]" />
+                        <span>{lang === "fa" ? "ذخیره تنظیمات و همگام‌سازی همگانی" : "Save Settings & Live Sync VPN Servers"}</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* Technical Installation & Sync Guide */}
+            <div className="bg-slate-900 text-slate-100 rounded-2xl p-6 space-y-4 shadow-sm font-sans border border-slate-800">
+              <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
+                <Shield className="h-5 w-5 text-green-400 animate-pulse" />
+                <h4 className="text-sm font-bold">
+                  {lang === "fa" ? "راهنمای راه‌اندازی زیرساخت واقعی VPN روی سرور" : "How to Setup Real VPN Infrastructure on Your Server"}
+                </h4>
+              </div>
+
+              <div className="space-y-4 text-xs leading-relaxed text-slate-300">
+                <p>
+                  {lang === "fa"
+                    ? "سیستم مکمل ثنایی مجهز به ماژول همگام‌سازی خودکار لوکال (Live Local Sync Engine) است. در صورتی که این برنامه بر روی همان سرور لینوکس VPS شما مستقر باشد، به‌طور خودکار تنظیمات کاربران را با پشته‌های سیستمی همگام می‌کند:"
+                    : "Sanaei Companion is equipped with a Live Local Sync Engine. When running natively as root on your Linux VPS, it automatically translates and propagates web database configurations to your system backend on every change:"}
+                </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* L2TP Setup Guide */}
+                  <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">
+                    <h5 className="font-bold text-slate-100 flex items-center gap-1.5 border-b border-slate-800 pb-1.5">
+                      <span className="h-2 w-2 rounded-full bg-[#4F46E5]"></span>
+                      L2TP / IPsec (chap-secrets)
+                    </h5>
+                    <p className="text-[11px] text-slate-400">
+                      {lang === "fa"
+                        ? "این اپلیکیشن نام کاربری و کلمه‌های عبور تولید شده را مستقیماً در فایل زیر بازنویسی می‌کند:"
+                        : "The app writes all current L2TP credentials directly and securely inside this system path:"}
+                    </p>
+                    <code className="block bg-slate-900 p-1.5 rounded text-[10px] font-mono text-indigo-400 select-all truncate">
+                      /etc/ppp/chap-secrets
+                    </code>
+                    <p className="text-[10px] text-slate-400 pt-1">
+                      {lang === "fa"
+                        ? "کافیست یک سرویس استاندارد IPSec/L2TP روی سرور نصب باشد. برای نصب آسان از دستور زیر استفاده کنید:"
+                        : "Just make sure a standard L2TP daemon is installed on the VPS. To install effortlessly:"}
+                    </p>
+                    <code className="block bg-slate-900 p-1.5 rounded text-[10px] font-mono text-green-400 select-all overflow-x-auto whitespace-pre">
+                      wget https://git.io/vpnsetup -O vpnsetup.sh && sudo bash vpnsetup.sh
+                    </code>
+                  </div>
+
+                  {/* WireGuard Setup Guide */}
+                  <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">
+                    <h5 className="font-bold text-slate-100 flex items-center gap-1.5 border-b border-slate-800 pb-1.5">
+                      <span className="h-2 w-2 rounded-full bg-green-500"></span>
+                      WireGuard (wg syncconf)
+                    </h5>
+                    <p className="text-[11px] text-slate-400">
+                      {lang === "fa"
+                        ? "این اپلیکیشن تمام کلاینت‌ها را به همراه کلیدهای عمومی رمزنگاری در فایل زیر بروز می‌کند:"
+                        : "Our sync engine rewrites and appends active clients into this configuration file:"}
+                    </p>
+                    <code className="block bg-slate-900 p-1.5 rounded text-[10px] font-mono text-green-400 select-all truncate">
+                      /etc/wireguard/wg0.conf
+                    </code>
+                    <p className="text-[10px] text-slate-400 pt-1">
+                      {lang === "fa"
+                        ? "سیستم بدون قطعی اتصال کاربران فعلی، تغییرات را با دستور زیر در جا اعمال (Hot-reload) می‌کند:"
+                        : "To avoid client disconnections, peers are dynamically merged using hot-reload:"}
+                    </p>
+                    <code className="block bg-slate-900 p-1.5 rounded text-[10px] font-mono text-indigo-400 select-all truncate">
+                      wg syncconf wg0 &lt;(wg-quick strip wg0)
+                    </code>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}
