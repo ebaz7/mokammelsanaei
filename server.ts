@@ -2293,8 +2293,8 @@ function generateXrayOutboundFromLink(link: string, fallbackHost = "127.0.0.1", 
 
 // Helper function to calculate per-inbound dedicated Bridge routing ports & subnets
 function getInboundBridgePorts(inbound: any, index: number) {
-  const wgPort = inbound?.bridgeWgPort || inbound?.wgPort || (51820 + index);
-  const openvpnPort = inbound?.bridgeOpenvpnPort || inbound?.openvpnPort || (1194 + index);
+  const wgPort = inbound?.bridgeWgPort || (51820 + index);
+  const openvpnPort = inbound?.bridgeOpenvpnPort || (1194 + index);
   const socksPort = inbound?.bridgeSocksPort || (10808 + index);
   const tproxyPort = 12345 + index;
   const subnetIndex = typeof inbound?.bridgeSubnetIndex === "number" ? inbound.bridgeSubnetIndex : index;

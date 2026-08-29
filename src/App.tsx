@@ -229,7 +229,9 @@ export default function App() {
     const safeIdx = inbIdx >= 0 ? inbIdx : 0;
     const isBridge = bridgeRoutingEnabled && !forceDirect;
     const priv = ensureValidWgKey(sub.wireguardPrivateKey, `sub_priv_${sub.id || sub.username}`);
-    const addr = isBridge ? `10.8.${safeIdx}.2/24` : (sub.wireguardAddress && sub.wireguardAddress.includes("/") ? sub.wireguardAddress : "10.8.0.2/24");
+    const subIdx = subscriptions.findIndex(s => s.id === sub.id);
+    const clientIp = 100 + (subIdx >= 0 ? subIdx : 0);
+    const addr = isBridge ? `10.8.${safeIdx}.${clientIp}/24` : (sub.wireguardAddress && sub.wireguardAddress.includes("/") ? sub.wireguardAddress : "10.8.0.2/24");
     const dns = sub.wireguardDns || wgServerDnsState || "1.1.1.1, 8.8.8.8";
     
     // Server Public Key
@@ -238,7 +240,7 @@ export default function App() {
     
     // Clean Host/IP (Points to Bridge Server if bridge is active)
     const rawHost = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp, forceDirect);
-    const serverPort = isBridge ? (inb?.bridgeWgPort || inb?.wgPort || (51820 + safeIdx)) : (inb?.wgPort || inb?.port || wgServerPortState || 51820);
+    const serverPort = isBridge ? (inb?.bridgeWgPort || (51820 + safeIdx)) : (inb?.wgPort || inb?.port || wgServerPortState || 51820);
     
     return `# -----------------------------------------------------------------
 # Sanaei Smart Sub - WireGuard Client Profile
@@ -365,7 +367,7 @@ CustomDialFunc=
     const safeIdx = inbIdx >= 0 ? inbIdx : 0;
     const isBridge = bridgeRoutingEnabled && !forceDirect;
     const serverIp = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp, forceDirect);
-    const port = isBridge ? (inb?.bridgeOpenvpnPort || inb?.openvpnPort || (1194 + safeIdx)) : (inb?.openvpnPort || sub.openvpnPort || 1194);
+    const port = isBridge ? (inb?.bridgeOpenvpnPort || (1194 + safeIdx)) : (inb?.openvpnPort || sub.openvpnPort || 1194);
     const proto = inb?.openvpnProto || sub.openvpnProto || "udp";
     const user = sub.openvpnUser || `vpn_${sub.username || "user"}`;
     const pass = sub.openvpnPass || "SanaeiOVPNPass";
@@ -3013,8 +3015,8 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                   <div className="space-y-2.5 pt-1">
                     {inbounds.map((inb, inbIdx) => {
                       const isSelected = (bridgeSelectedInboundId || inbounds[0]?.id) === inb.id;
-                      const wgDedicatedPort = inb.bridgeWgPort || inb.wgPort || (51820 + inbIdx);
-                      const ovpnDedicatedPort = inb.bridgeOpenvpnPort || inb.openvpnPort || (1194 + inbIdx);
+                      const wgDedicatedPort = inb.bridgeWgPort || (51820 + inbIdx);
+                      const ovpnDedicatedPort = inb.bridgeOpenvpnPort || (1194 + inbIdx);
                       const socksDedicatedPort = inb.bridgeSocksPort || (10808 + inbIdx);
                       const dedicatedSubnet = `10.8.${inbIdx}.0/24`;
 
