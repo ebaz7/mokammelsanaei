@@ -1,0 +1,6 @@
+{
+  "name": "3x-ui L2TP & Smart Subscription Manager",
+  "description": "A management tool and smart subscription proxy for MHSanaei 3x-ui, generating legacy L2TP/IPSec, modern WireGuard configs, and auto-updating self-switching Clash/Sing-box profiles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
