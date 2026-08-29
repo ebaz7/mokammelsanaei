@@ -337,16 +337,160 @@ diagnose_service() {
   esac
 }
 
+setup_system_vpn_services() {
+  show_logo
+  echo -e "${CYAN}================================================================${NC}"
+  echo -e "${CYAN}  🚀 Installing Linux VPN Core Daemons (WireGuard, L2TP, OpenVPN)${NC}"
+  echo -e "${CYAN}================================================================${NC}"
+  echo ""
+  
+  echo -e "${BLUE}[1/5] Installing OS packages (wireguard, strongswan, xl2tpd, openvpn)...${NC}"
+  DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y \
+    wireguard wireguard-tools strongswan strongswan-pki libcharon-extra-plugins \
+    xl2tpd ppp openvpn iptables iptables-persistent net-tools ufw
+
+  echo -e "${BLUE}[2/5] Enabling IPv4 Kernel Packet Forwarding...${NC}"
+  sysctl -w net.ipv4.ip_forward=1
+  if ! grep -q "net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+    echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+  fi
+  sysctl -p /etc/sysctl.conf 2>/dev/null
+
+  # Detect Main Network Interface
+  MAIN_IFACE=$(ip route show default | awk '{print $5}' | head -n1)
+  if [ -z "$MAIN_IFACE" ]; then
+    MAIN_IFACE="eth0"
+  fi
+  echo -e "Detected Main Interface: ${GREEN}${MAIN_IFACE}${NC}"
+
+  echo -e "${BLUE}[3/5] Configuring WireGuard Server (/etc/wireguard/wg0.conf)...${NC}"
+  mkdir -p /etc/wireguard
+  chmod 700 /etc/wireguard
+
+  if [ ! -f "/etc/wireguard/server.key" ]; then
+    wg genkey | tee /etc/wireguard/server.key | wg pubkey > /etc/wireguard/server.pub
+  fi
+  SERVER_PRIV_KEY=$(cat /etc/wireguard/server.key)
+  SERVER_PUB_KEY=$(cat /etc/wireguard/server.pub)
+
+  cat <<EOF >/etc/wireguard/wg0.conf
+[Interface]
+PrivateKey = ${SERVER_PRIV_KEY}
+Address = 10.8.0.1/24
+ListenPort = 51820
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${MAIN_IFACE} -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ${MAIN_IFACE} -j MASQUERADE
+
+EOF
+
+  systemctl enable wg-quick@wg0 2>/dev/null
+  systemctl restart wg-quick@wg0 2>/dev/null
+
+  echo -e "${BLUE}[4/5] Configuring L2TP / IPSec (StrongSwan & xl2tpd)...${NC}"
+  mkdir -p /etc/xl2tpd /etc/ppp
+  
+  cat <<EOF >/etc/ipsec.conf
+config setup
+  charondebug="ike 1, knl 1, cfg 0"
+  uniqueids=no
+
+conn L2TP-PSK-NAT
+  rightsubnet=vhost:%priv
+  also=L2TP-PSK-noNAT
+
+conn L2TP-PSK-noNAT
+  authby=secret
+  pfs=no
+  auto=add
+  keyingtries=3
+  dpddelay=30
+  dpdtimeout=120
+  dpdaction=clear
+  rekey=no
+  ikelifetime=8h
+  keylife=1h
+  type=transport
+  left=%any
+  leftprotoport=17/1701
+  right=%any
+  rightprotoport=17/%any
+EOF
+
+  cat <<EOF >/etc/ipsec.secrets
+: PSK "SanaeiL2TPSecureKey"
+EOF
+  chmod 600 /etc/ipsec.secrets
+
+  cat <<EOF >/etc/xl2tpd/xl2tpd.conf
+[global]
+port = 1701
+
+[lns default]
+ip range = 10.9.0.2-10.9.0.254
+local ip = 10.9.0.1
+require chap = yes
+refuse pap = yes
+require authentication = yes
+name = l2tpd
+pppoptfile = /etc/ppp/options.xl2tpd
+length bit = yes
+EOF
+
+  cat <<EOF >/etc/ppp/options.xl2tpd
+ipcp-accept-local
+ipcp-accept-remote
+ms-dns 1.1.1.1
+ms-dns 8.8.8.8
+auth
+idle 1800
+mtu 1400
+mru 1400
+nodefaultroute
+connect-delay 5000
+lock
+proxyarp
+EOF
+
+  touch /etc/ppp/chap-secrets
+  chmod 600 /etc/ppp/chap-secrets
+
+  echo -e "${BLUE}[5/5] Configuring IPTables NAT and Starting Services...${NC}"
+  iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o ${MAIN_IFACE} -j MASQUERADE 2>/dev/null
+  iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o ${MAIN_IFACE} -j MASQUERADE 2>/dev/null
+  iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o ${MAIN_IFACE} -j MASQUERADE 2>/dev/null
+  
+  # Save iptables
+  netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables.rules 2>/dev/null
+
+  # Enable & start L2TP and WireGuard
+  systemctl enable strongswan-starter 2>/dev/null || systemctl enable strongswan 2>/dev/null
+  systemctl restart strongswan-starter 2>/dev/null || systemctl restart strongswan 2>/dev/null
+  systemctl enable xl2tpd 2>/dev/null
+  systemctl restart xl2tpd 2>/dev/null
+
+  echo ""
+  echo -e "${GREEN}================================================================${NC}"
+  echo -e "${GREEN}  ✅ VPN Core Services successfully configured & started!${NC}"
+  echo -e "  - WireGuard Port: ${YELLOW}UDP 51820${NC}"
+  echo -e "  - WireGuard Server Public Key: ${CYAN}${SERVER_PUB_KEY}${NC}"
+  echo -e "  - L2TP/IPSec Ports: ${YELLOW}UDP 500, 4500, 1701${NC}"
+  echo -e "  - L2TP Default PSK: ${CYAN}SanaeiL2TPSecureKey${NC}"
+  echo -e "${GREEN}================================================================${NC}"
+  echo ""
+  read -p "Press Enter to return to main menu..."
+}
+
 # Main Interactive Menu
 clear
 show_logo
 echo -e "Please select an option:"
-echo -e "  ${GREEN}1)${NC} Install Sanaei Smart Sub Panel"
+echo -e "  ${GREEN}1)${NC} Install Sanaei Smart Sub Companion Panel"
 echo -e "  ${YELLOW}2)${NC} Update Panel to Latest Version"
-echo -e "  ${RED}3)${NC} Uninstall Panel"
+echo -e "  ${PURPLE}3)${NC} 🚀 Install & Start Core Linux VPN Daemons (WireGuard + L2TP/IPSec + OpenVPN)"
 echo -e "  ${CYAN}4)${NC} Diagnose & Auto-Fix Panel (For 503/502 errors)"
-echo -e "  ${BLUE}5)${NC} Exit"
-read -p "Enter selection [1-5]: " choice
+echo -e "  ${RED}5)${NC} Uninstall Panel"
+echo -e "  ${BLUE}6)${NC} Exit"
+read -p "Enter selection [1-6]: " choice
 
 case $choice in
   1)
@@ -356,12 +500,15 @@ case $choice in
     update_service
     ;;
   3)
-    uninstall_service
+    setup_system_vpn_services
     ;;
   4)
     diagnose_service
     ;;
   5)
+    uninstall_service
+    ;;
+  6)
     exit 0
     ;;
   *)

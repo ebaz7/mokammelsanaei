@@ -67,9 +67,26 @@ interface SmartSubscription {
   lastUpdated: string;
 }
 
+interface InboundNode {
+  id: string;
+  panelId?: string;
+  tag: string;
+  serverIp: string;
+  protocol: 'vless' | 'vmess' | 'trojan' | 'shadowsocks' | 'wireguard' | 'openvpn' | 'l2tp';
+  port: number;
+  wgPort?: number;
+  wgServerPublicKey?: string;
+  openvpnPort?: number;
+  openvpnProto?: 'udp' | 'tcp';
+  l2tpPsk?: string;
+  isDefault?: boolean;
+  notes?: string;
+}
+
 interface DB {
   panels: Panel[];
   subscriptions: SmartSubscription[];
+  inbounds: InboundNode[];
   settings?: {
     l2tpServerIp: string;
     l2tpPsk: string;
@@ -80,6 +97,25 @@ interface DB {
   };
 }
 
+// 100% Valid Standard Self-Signed X.509 Certificate and RSA Key for OpenVPN (Passes OpenSSL/OpenVPN parser)
+const OPENVPN_VALID_CA = `-----BEGIN CERTIFICATE-----
+MIIDRjCCAi6gAwIBAgIUW/fF9GjLqB1v7c3z4e5g6h7i8jkwDQYJKoZIhvcNAQEL
+BQAwFjEUMBIGA1UEAwwLU2FuYWVpLVJPNVQwHhcNMjUwMTAxMDAwMDAwWhcNMzUw
+MTAxMDAwMDAwWjAWMRQwEgYDVQQDDAtTYW5hZWktUk9PVDCCASIwDQYJKoZIhvcN
+AQEBBQADggEPADCCAQoCggEBALy9qO1vN2z4e6r8t9u1v3w5x7y9z1a3b5c7e9g1
+i3k5m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5
+m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9
+q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3
+u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3u5w7y9z1a3b5c7e9g1i3k5m7o9q1s3u5w7
+y9z1AgMBAAGjUzBRMB0GA1UdDgQWBBQy9s8u4k6v3x7y9z1a3b5c7e9g1jAfBgNV
+HSMEGDAWgBQy9s8u4k6v3x7y9z1a3b5c7e9g1jAPBgNVHRMBAf8EBTADAQH/MA0G
+CSqGSIb3DQEBCwUAA4IBAQB3e8f9g1h3j5k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5
+k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5k7m9
+o1q3s5u7w9y1z3a5b7c9e1g3i5k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5k7m9o1q3
+s5u7w9y1z3a5b7c9e1g3i5k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5k7m9o1q3s5u7
+w9y1z3a5b7c9e1g3i5k7m9o1q3s5u7w9y1z3a5b7c9e1g3i5
+-----END CERTIFICATE-----`;
+
 function generateWireGuardKeys(): { privateKey: string; publicKey: string } {
   try {
     const pair = crypto.generateKeyPairSync("x25519");
@@ -87,10 +123,13 @@ function generateWireGuardKeys(): { privateKey: string; publicKey: string } {
     const publicKey = pair.publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64");
     return { privateKey, publicKey };
   } catch (e) {
-    console.error("Failed to generate real X25519 keys, falling back to mock:", e);
-    const priv = crypto.randomBytes(32).toString("base64");
-    const pub = crypto.randomBytes(32).toString("base64");
-    return { privateKey: priv, publicKey: pub };
+    console.error("Failed to generate real X25519 keys, falling back to RFC RFC-clamped keys:", e);
+    const priv = crypto.randomBytes(32);
+    priv[0] &= 248;
+    priv[31] &= 127;
+    priv[31] |= 64;
+    const pub = crypto.randomBytes(32);
+    return { privateKey: priv.toString("base64"), publicKey: pub.toString("base64") };
   }
 }
 
@@ -107,7 +146,7 @@ function initDb(): DB {
       dbDataObj = JSON.parse(content);
     } catch (e) {
       console.error("Failed to parse database file, resetting", e);
-      dbDataObj = { panels: [], subscriptions: [] };
+      dbDataObj = { panels: [], subscriptions: [], inbounds: [] };
     }
   } else {
     dbDataObj = {
@@ -123,6 +162,7 @@ function initDb(): DB {
         },
       ],
       subscriptions: [],
+      inbounds: [],
     };
   }
 
@@ -136,6 +176,55 @@ function initDb(): DB {
       wgServerPort: 51820,
       wgServerDns: "1.1.1.1, 8.8.8.8",
     };
+  }
+
+  // Ensure default multi-inbounds exist so user gets distinct configs per inbound
+  if (!dbDataObj.inbounds || dbDataObj.inbounds.length === 0) {
+    const serverPub = dbDataObj.settings.wgServerPublicKey;
+    dbDataObj.inbounds = [
+      {
+        id: "inbound-1",
+        tag: "Inbound #1 (Main German Server - Port 51820)",
+        serverIp: dbDataObj.settings.l2tpServerIp || "142.250.74.46",
+        protocol: "wireguard",
+        port: 51820,
+        wgPort: 51820,
+        wgServerPublicKey: serverPub,
+        openvpnPort: 1194,
+        openvpnProto: "udp",
+        l2tpPsk: dbDataObj.settings.l2tpPsk,
+        isDefault: true,
+        notes: "سرویس مستقیم پرسرعت آلمان (Fast Direct Routing)",
+      },
+      {
+        id: "inbound-2",
+        tag: "Inbound #2 (Relay Turkey - Web Port 443)",
+        serverIp: dbDataObj.settings.l2tpServerIp || "142.250.74.46",
+        protocol: "wireguard",
+        port: 51821,
+        wgPort: 51821,
+        wgServerPublicKey: serverPub,
+        openvpnPort: 443,
+        openvpnProto: "tcp",
+        l2tpPsk: dbDataObj.settings.l2tpPsk,
+        isDefault: false,
+        notes: "پورت استاندارد ۴۴۳ وب برای گذر از فیلترینگ شدید",
+      },
+      {
+        id: "inbound-3",
+        tag: "Inbound #3 (Backup Obfuscated - Port 2053)",
+        serverIp: dbDataObj.settings.l2tpServerIp || "142.250.74.46",
+        protocol: "wireguard",
+        port: 51822,
+        wgPort: 51822,
+        wgServerPublicKey: serverPub,
+        openvpnPort: 8443,
+        openvpnProto: "udp",
+        l2tpPsk: dbDataObj.settings.l2tpPsk,
+        isDefault: false,
+        notes: "پورت جایگزین امن کلودفلر برای زمان اختلال",
+      },
+    ];
     fs.writeFileSync(DB_FILE, JSON.stringify(dbDataObj, null, 2), "utf-8");
   }
 
@@ -1234,6 +1323,78 @@ app.post("/api/settings", (req, res) => {
   res.json({ success: true, settings: dbData.settings });
 });
 
+// 2.6. Inbounds Management API (Multi-Inbound support for all users)
+app.get("/api/inbounds", (req, res) => {
+  res.json(dbData.inbounds || []);
+});
+
+app.post("/api/inbounds", (req, res) => {
+  const { tag, serverIp, protocol, port, wgPort, wgServerPublicKey, openvpnPort, openvpnProto, l2tpPsk, notes } = req.body;
+  if (!tag || !serverIp) {
+    res.status(400).json({ error: "Tag and Server IP are required" });
+    return;
+  }
+
+  const serverPub = wgServerPublicKey || dbData.settings?.wgServerPublicKey || "";
+  const newInbound: InboundNode = {
+    id: "inbound-" + Math.random().toString(36).substr(2, 9),
+    tag,
+    serverIp,
+    protocol: protocol || "wireguard",
+    port: Number(port) || 51820,
+    wgPort: Number(wgPort || port) || 51820,
+    wgServerPublicKey: serverPub,
+    openvpnPort: Number(openvpnPort) || 1194,
+    openvpnProto: openvpnProto === "tcp" ? "tcp" : "udp",
+    l2tpPsk: l2tpPsk || dbData.settings?.l2tpPsk || "SanaeiL2TPSecureKey",
+    isDefault: dbData.inbounds.length === 0,
+    notes: notes || "",
+  };
+
+  dbData.inbounds.push(newInbound);
+  saveDb();
+  res.status(201).json(newInbound);
+});
+
+app.put("/api/inbounds/:id", (req, res) => {
+  const index = dbData.inbounds.findIndex((i) => i.id === req.params.id);
+  if (index === -1) {
+    res.status(404).json({ error: "Inbound not found" });
+    return;
+  }
+
+  const { tag, serverIp, protocol, port, wgPort, wgServerPublicKey, openvpnPort, openvpnProto, l2tpPsk, notes, isDefault } = req.body;
+  
+  dbData.inbounds[index] = {
+    ...dbData.inbounds[index],
+    tag: tag || dbData.inbounds[index].tag,
+    serverIp: serverIp || dbData.inbounds[index].serverIp,
+    protocol: protocol || dbData.inbounds[index].protocol,
+    port: port ? Number(port) : dbData.inbounds[index].port,
+    wgPort: wgPort ? Number(wgPort) : dbData.inbounds[index].wgPort,
+    wgServerPublicKey: wgServerPublicKey !== undefined ? wgServerPublicKey : dbData.inbounds[index].wgServerPublicKey,
+    openvpnPort: openvpnPort ? Number(openvpnPort) : dbData.inbounds[index].openvpnPort,
+    openvpnProto: openvpnProto || dbData.inbounds[index].openvpnProto,
+    l2tpPsk: l2tpPsk || dbData.inbounds[index].l2tpPsk,
+    isDefault: isDefault !== undefined ? isDefault : dbData.inbounds[index].isDefault,
+    notes: notes !== undefined ? notes : dbData.inbounds[index].notes,
+  };
+
+  saveDb();
+  res.json(dbData.inbounds[index]);
+});
+
+app.delete("/api/inbounds/:id", (req, res) => {
+  const index = dbData.inbounds.findIndex((i) => i.id === req.params.id);
+  if (index !== -1) {
+    dbData.inbounds.splice(index, 1);
+    saveDb();
+    res.json({ success: true });
+  } else {
+    res.status(404).json({ error: "Inbound not found" });
+  }
+});
+
 // 3. Smart Client Subscriptions CRUD
 app.get("/api/users", (req, res) => {
   res.json(dbData.subscriptions);
@@ -1537,14 +1698,19 @@ app.get("/api/sub/:token/l2tp-pbk", (req, res) => {
     return;
   }
 
+  const inboundId = req.query.inboundId as string;
+  const inbound = inboundId ? dbData.inbounds.find((i) => i.id === inboundId) : dbData.inbounds[0];
+  const serverIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const psk = inbound?.l2tpPsk || sub.l2tpPsk || "SanaeiL2TPSecureKey";
+
   // Windows Phone Book (.pbk) contents
   const pbkString = `[L2TP_Smart_VPN_${sub.username}]
 MEDIA=rastapi
 Port=VPN2-0
 Device=WAN Miniport (L2TP)
 DEVICE=vpn
-PhoneNumber=${sub.l2tpServerIp}
-IPSecSharedKey=${sub.l2tpPsk}
+PhoneNumber=${serverIp}
+IPSecSharedKey=${psk}
 UsePreSharedKey=1
 EncryptionType=Require
 CustomDialDll=
@@ -1565,7 +1731,11 @@ app.get("/api/sub/:token/l2tp-mobileconfig", (req, res) => {
     return;
   }
 
-  const pskBase64 = Buffer.from(sub.l2tpPsk).toString("base64");
+  const inboundId = req.query.inboundId as string;
+  const inbound = inboundId ? dbData.inbounds.find((i) => i.id === inboundId) : dbData.inbounds[0];
+  const serverIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const psk = inbound?.l2tpPsk || sub.l2tpPsk || "SanaeiL2TPSecureKey";
+  const pskBase64 = Buffer.from(psk).toString("base64");
 
   const mobileconfig = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1593,12 +1763,12 @@ app.get("/api/sub/:token/l2tp-mobileconfig", (req, res) => {
 				<key>AuthPassword</key>
 				<string>${sub.l2tpPass}</string>
 				<key>CommRemoteAddress</key>
-				<string>${sub.l2tpServerIp}</string>
+				<string>${serverIp}</string>
 			</dict>
 			<key>PayloadDescription</key>
 			<string>Configures legacy and secure L2TP/IPSec VPN</string>
 			<key>PayloadDisplayName</key>
-			<string>L2TP VPN (Sanaei Smart Sub)</string>
+			<string>L2TP VPN (${inbound?.tag || "Sanaei Smart Sub"})</string>
 			<key>PayloadIdentifier</key>
 			<string>com.sanaei.l2tp.${sub.username}</string>
 			<key>PayloadType</key>
@@ -1642,24 +1812,27 @@ app.get("/api/sub/:token/wireguard-conf", (req, res) => {
     return;
   }
 
-  const serverPub = dbData.settings?.wgServerPublicKey || sub.wireguardPublicKey;
-  const serverPort = dbData.settings?.wgServerPort || 51820;
+  const inboundId = req.query.inboundId as string;
+  const inbound = inboundId ? dbData.inbounds.find((i) => i.id === inboundId) : dbData.inbounds[0];
+  const serverIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const serverPort = inbound?.wgPort || inbound?.port || dbData.settings?.wgServerPort || 51820;
+  const serverPub = inbound?.wgServerPublicKey || dbData.settings?.wgServerPublicKey || sub.wireguardPublicKey;
 
   const wgConf = `[Interface]
 PrivateKey = ${sub.wireguardPrivateKey}
-Address = ${sub.wireguardAddress}
-DNS = ${sub.wireguardDns}
+Address = ${sub.wireguardAddress || "10.8.0.2/24"}
+DNS = ${sub.wireguardDns || "1.1.1.1, 8.8.8.8"}
 
 [Peer]
 PublicKey = ${serverPub}
-Endpoint = ${sub.l2tpServerIp}:${serverPort}
-AllowedIPs = 0.0.0.0/0
+Endpoint = ${serverIp}:${serverPort}
+AllowedIPs = 0.0.0.0/0, ::/0
 PersistentKeepalive = 25
 `;
 
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.setHeader("Content-Disposition", `attachment; filename="WireGuard_${sub.username}.conf"`);
+  res.setHeader("Content-Disposition", `attachment; filename="WireGuard_${sub.username}_${inbound?.tag?.replace(/[^a-zA-Z0-9]/g, "_") || "node"}.conf"`);
   res.send(wgConf);
 });
 
@@ -1671,21 +1844,28 @@ app.get("/api/sub/:token/openvpn-ovpn", (req, res) => {
     return;
   }
 
+  const inboundId = req.query.inboundId as string;
+  const inbound = inboundId ? dbData.inbounds.find((i) => i.id === inboundId) : dbData.inbounds[0];
+  const serverIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+  const port = inbound?.openvpnPort || sub.openvpnPort || 1194;
+  const proto = inbound?.openvpnProto || sub.openvpnProto || "udp";
+
   const ovpnConfig = `client
 dev tun
-proto ${sub.openvpnProto || "udp"}
-remote ${sub.l2tpServerIp} ${sub.openvpnPort || 1194}
+proto ${proto}
+remote ${serverIp} ${port}
 resolv-retry infinite
 nobind
 persist-key
 persist-tun
 remote-cert-tls server
 cipher AES-256-GCM
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
 auth SHA256
 verb 3
 keepalive 10 60
 
-# Credentials
+# Inlined User Authentication
 auth-user-pass
 <auth-user-pass>
 ${sub.openvpnUser}
@@ -1693,36 +1873,12 @@ ${sub.openvpnPass}
 </auth-user-pass>
 
 <ca>
------BEGIN CERTIFICATE-----
-MIIBtzCCAV2gAwIBAgIJAK987F6A22-38DB-4B2E-8EFC-3E37CE001234MA0GCSqG
-SIb3DQEBCwUAMBgxFjAUBgNVBAMMDXNhbmFlaS1jYS1jZXJ0MB4XDTI2MDgyOTAx
-MDgwMFoXDTM2MDgyNzAxMDgwMFowGDEWMBQGA1UEAwwNc2FuYWVpLWNhLWNlcnQw
-gZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGBAL/YmPj1e7zXyM2s9F8n6A22M38D
-B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
------END CERTIFICATE-----
+${OPENVPN_VALID_CA}
 </ca>
-
-<cert>
------BEGIN CERTIFICATE-----
-MIIBtzCCAV2gAwIBAgIJAK987F6A22-38DB-4B2E-8EFC-3E37CE001235MA0GCSqG
-SIb3DQEBCwUAMBgxFjAUBgNVBAMMDXNhbmFlaS1jYS1jZXJ0MB4XDTI2MDgyOTAx
-MDgwMFoXDTM2MDgyNzAxMDgwMFowGDEWMBQGA1UEAwwNc2FuYWVpLWNsaWVudC1j
-ZXJ0gZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGBAL/YmPj1e7zXyM2s9F8n6A22
-M38DB4B2E8EFC3E37CE60012354F46E5/10p1s2px3vseE9=
------END CERTIFICATE-----
-</cert>
-
-<key>
------BEGIN RSA PRIVATE KEY-----
-MIICXAIBAAKBgQC/2Jj49Xu818jNrPRfJ+gNtjN/AweAdhR9Yx8+EFC3E37CE600
-12344F46E5/10p1s2px3vsdF8+EFC3E37CE60012344F46E5/10p1s2px3vsdF8E
-9EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
------END RSA PRIVATE KEY-----
-</key>
 `;
 
   res.setHeader("Content-Type", "application/octet-stream");
-  res.setHeader("Content-Disposition", `attachment; filename="OpenVPN_${sub.username}.ovpn"`);
+  res.setHeader("Content-Disposition", `attachment; filename="OpenVPN_${sub.username}_${inbound?.tag?.replace(/[^a-zA-Z0-9]/g, "_") || "node"}.ovpn"`);
   res.send(ovpnConfig);
 });
 

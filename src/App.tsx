@@ -26,17 +26,41 @@ import {
   Wifi, 
   ArrowRight,
   ExternalLink,
-  Lock
+  Lock,
+  Layers,
+  CheckCircle2,
+  AlertTriangle,
+  Terminal,
+  Zap
 } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
-import { Panel, SmartSubscription, MockNode } from "./types";
+import { Panel, SmartSubscription, MockNode, InboundNode } from "./types";
 
 export default function App() {
   // Localization state (fa = Persian, en = English)
   const [lang, setLang] = useState<"fa" | "en">("fa");
 
-  // App major views: 'dashboard', 'panels', 'add-user', 'manuals', 'converter', 'settings'
-  const [currentTab, setCurrentTab] = useState<"dashboard" | "panels" | "manuals" | "converter" | "settings">("dashboard");
+  // App major views: 'dashboard', 'inbounds', 'panels', 'converter', 'settings', 'manuals'
+  const [currentTab, setCurrentTab] = useState<"dashboard" | "inbounds" | "panels" | "converter" | "settings" | "manuals">("dashboard");
+
+  // Feasibility Guide modal state
+  const [showFeasibilityModal, setShowFeasibilityModal] = useState(false);
+
+  // Inbounds State (Multi-inbound support per panel)
+  const [inbounds, setInbounds] = useState<InboundNode[]>([]);
+  const [selectedInboundId, setSelectedInboundId] = useState<string>("");
+  const [loadingInbounds, setLoadingInbounds] = useState(false);
+  const [isInboundModalOpen, setIsInboundModalOpen] = useState(false);
+  const [newInboundTag, setNewInboundTag] = useState("");
+  const [newInboundServerIp, setNewInboundServerIp] = useState("");
+  const [newInboundProtocol, setNewInboundProtocol] = useState<'wireguard' | 'openvpn' | 'l2tp' | 'vless'>('wireguard');
+  const [newInboundPort, setNewInboundPort] = useState(51820);
+  const [newInboundWgPort, setNewInboundWgPort] = useState(51820);
+  const [newInboundOpenvpnPort, setNewInboundOpenvpnPort] = useState(1194);
+  const [newInboundOpenvpnProto, setNewInboundOpenvpnProto] = useState<'udp' | 'tcp'>('udp');
+  const [newInboundL2tpPsk, setNewInboundL2tpPsk] = useState("SanaeiL2TPSecureKey");
+  const [newInboundNotes, setNewInboundNotes] = useState("");
+  const [isCreatingInbound, setIsCreatingInbound] = useState(false);
 
   // Global VPN Settings state
   const [l2tpServerIpState, setL2tpServerIpState] = useState("");
@@ -76,20 +100,30 @@ export default function App() {
   // Subscriptions state
   const [subs, setSubs] = useState<SmartSubscription[]>([]);
   const [selectedSub, setSelectedSub] = useState<SmartSubscription | null>(null);
-  const [deviceTab, setDeviceTab] = useState<"ios" | "android" | "windows" | "wireguard" | "autoswitch" | "openvpn">("ios");
+  const [deviceTab, setDeviceTab] = useState<"ios" | "android" | "windows" | "wireguard" | "autoswitch" | "openvpn">("wireguard");
   const [showRawWg, setShowRawWg] = useState(false);
   const [syncingPanelId, setSyncingPanelId] = useState<string | null>(null);
   const [syncFeedback, setSyncFeedback] = useState<{ [panelId: string]: string }>({});
 
+  // Helper to find the active inbound object
+  const getActiveInbound = (): InboundNode | undefined => {
+    if (selectedInboundId) {
+      return inbounds.find(i => i.id === selectedInboundId);
+    }
+    return inbounds[0];
+  };
+
   // Helper generators for client-side instant profile downloads and QR codes
-  const getWireguardConf = (sub: SmartSubscription) => {
+  const getWireguardConf = (sub: SmartSubscription, customInbound?: InboundNode | null) => {
     if (!sub) return "";
+    const inb = customInbound || getActiveInbound();
     const priv = sub.wireguardPrivateKey || "aHR0cHM6Ly9naXRodWIuY29tL01IU2FuYWVpLzN4LXVpCg==";
     const addr = sub.wireguardAddress || "10.8.0.2/24";
     const dns = sub.wireguardDns || "1.1.1.1, 8.8.8.8";
-    const serverPub = wgServerPublicKeyState || sub.wireguardPublicKey || "bm90LXNldC1wbGVhc2Utc2V0LXBr";
-    const serverIp = sub.l2tpServerIp || window.location.hostname || "127.0.0.1";
-    const serverPort = wgServerPortState || 51820;
+    const serverPub = inb?.wgServerPublicKey || wgServerPublicKeyState || sub.wireguardPublicKey || "bm90LXNldC1wbGVhc2Utc2V0LXBr";
+    const serverIp = inb?.serverIp || sub.l2tpServerIp || window.location.hostname || "127.0.0.1";
+    const serverPort = inb?.wgPort || inb?.port || wgServerPortState || 51820;
+    
     return `[Interface]
 PrivateKey = ${priv}
 Address = ${addr}
@@ -103,11 +137,12 @@ PersistentKeepalive = 25
 `;
   };
 
-  const getWindowsPbk = (sub: SmartSubscription) => {
+  const getWindowsPbk = (sub: SmartSubscription, customInbound?: InboundNode | null) => {
     if (!sub) return "";
+    const inb = customInbound || getActiveInbound();
     const user = sub.username || "user";
-    const serverIp = sub.l2tpServerIp || "127.0.0.1";
-    const psk = sub.l2tpPsk || "SanaeiL2TPSecureKey";
+    const serverIp = inb?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+    const psk = inb?.l2tpPsk || sub.l2tpPsk || "SanaeiL2TPSecureKey";
     return `[L2TP_VPN_${user}]
 MEDIA=rastapi
 Port=VPN2-0
@@ -122,13 +157,14 @@ CustomDialFunc=
 `;
   };
 
-  const getAppleMobileConfig = (sub: SmartSubscription) => {
+  const getAppleMobileConfig = (sub: SmartSubscription, customInbound?: InboundNode | null) => {
     if (!sub) return "";
+    const inb = customInbound || getActiveInbound();
     const user = sub.username || "user";
     const l2tpUser = sub.l2tpUser || user;
     const l2tpPass = sub.l2tpPass || "password";
-    const serverIp = sub.l2tpServerIp || "127.0.0.1";
-    const psk = sub.l2tpPsk || "SanaeiL2TPSecureKey";
+    const serverIp = inb?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+    const psk = inb?.l2tpPsk || sub.l2tpPsk || "SanaeiL2TPSecureKey";
     let pskBase64 = "";
     try {
       pskBase64 = btoa(psk);
@@ -166,7 +202,7 @@ CustomDialFunc=
 			<key>PayloadDescription</key>
 			<string>Configures legacy and secure L2TP/IPSec VPN</string>
 			<key>PayloadDisplayName</key>
-			<string>L2TP VPN (${user})</string>
+			<string>L2TP VPN (${inb?.tag || user})</string>
 			<key>PayloadIdentifier</key>
 			<string>com.sanaei.l2tp.${user}</string>
 			<key>PayloadType</key>
@@ -197,21 +233,26 @@ CustomDialFunc=
 </plist>`;
   };
 
-  const getOpenVpnConfig = (sub: SmartSubscription) => {
+  const getOpenVpnConfig = (sub: SmartSubscription, customInbound?: InboundNode | null) => {
     if (!sub) return "";
-    const serverIp = sub.l2tpServerIp || "127.0.0.1";
+    const inb = customInbound || getActiveInbound();
+    const serverIp = inb?.serverIp || sub.l2tpServerIp || "127.0.0.1";
+    const port = inb?.openvpnPort || sub.openvpnPort || 1194;
+    const proto = inb?.openvpnProto || sub.openvpnProto || "udp";
     const user = sub.openvpnUser || `vpn_${sub.username || "user"}`;
     const pass = sub.openvpnPass || "SanaeiOVPNPass";
+    
     return `client
 dev tun
-proto ${sub.openvpnProto || "udp"}
-remote ${serverIp} ${sub.openvpnPort || 1194}
+proto ${proto}
+remote ${serverIp} ${port}
 resolv-retry infinite
 nobind
 persist-key
 persist-tun
 remote-cert-tls server
 cipher AES-256-GCM
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
 auth SHA256
 verb 3
 keepalive 10 60
@@ -291,8 +332,90 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
   useEffect(() => {
     fetchPanels();
     fetchSubscriptions();
+    fetchInbounds();
     fetchSettings();
   }, []);
+
+  const fetchInbounds = async () => {
+    setLoadingInbounds(true);
+    try {
+      const res = await fetch("/api/inbounds");
+      if (res.ok) {
+        const data = await res.json();
+        setInbounds(data);
+        if (data.length > 0 && !selectedInboundId) {
+          setSelectedInboundId(data[0].id);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load inbounds", e);
+    } finally {
+      setLoadingInbounds(false);
+    }
+  };
+
+  const handleCreateInbound = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newInboundTag || !newInboundServerIp) {
+      alert(lang === "fa" ? "لطفاً نام و آی‌پی سرور اینباند را وارد نمایید." : "Please enter Inbound Tag and Server IP.");
+      return;
+    }
+
+    setIsCreatingInbound(true);
+    try {
+      const res = await fetch("/api/inbounds", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tag: newInboundTag,
+          serverIp: newInboundServerIp,
+          protocol: newInboundProtocol,
+          port: newInboundPort,
+          wgPort: newInboundWgPort,
+          openvpnPort: newInboundOpenvpnPort,
+          openvpnProto: newInboundOpenvpnProto,
+          l2tpPsk: newInboundL2tpPsk,
+          notes: newInboundNotes,
+        }),
+      });
+
+      if (res.ok) {
+        const created = await res.json();
+        setNewInboundTag("");
+        setNewInboundServerIp("");
+        setNewInboundNotes("");
+        setIsInboundModalOpen(false);
+        await fetchInbounds();
+        setSelectedInboundId(created.id);
+      }
+    } catch (err) {
+      console.error("Failed to create inbound", err);
+    } finally {
+      setIsCreatingInbound(false);
+    }
+  };
+
+  const handleDeleteInbound = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (inbounds.length <= 1) {
+      alert(lang === "fa" ? "حداقل یک اینباند باید در سیستم وجود داشته باشد." : "At least one inbound is required.");
+      return;
+    }
+    if (!confirm(lang === "fa" ? "آیا از حذف این اینباند اطمینان دارید؟" : "Are you sure you want to delete this inbound?")) return;
+
+    try {
+      const res = await fetch(`/api/inbounds/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        await fetchInbounds();
+        if (selectedInboundId === id) {
+          const remaining = inbounds.filter(i => i.id !== id);
+          if (remaining.length > 0) setSelectedInboundId(remaining[0].id);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   const fetchSettings = async () => {
     try {
@@ -630,6 +753,16 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Feasibility / Architecture Guide button */}
+            <button
+              onClick={() => setShowFeasibilityModal(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-indigo-200 text-xs font-semibold text-indigo-700 bg-indigo-50/70 hover:bg-indigo-100 transition-all shadow-xs"
+              id="feasibility-btn"
+            >
+              <Zap className="h-3.5 w-3.5 text-indigo-600" />
+              <span>{lang === "fa" ? "بررسی فنی و راهنمای کارکرد" : "Architecture & Protocol Guide"}</span>
+            </button>
+
             {/* Language Switcher Button */}
             <button
               onClick={() => setLang(lang === "fa" ? "en" : "fa")}
@@ -658,10 +791,10 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8">
         
         {/* Navigation Tabs */}
-        <div className="flex flex-wrap items-center gap-1 p-1 bg-gray-100 rounded-2xl max-w-2xl mb-8" id="main-tabs">
+        <div className="flex flex-wrap items-center gap-1 p-1 bg-gray-100 rounded-2xl max-w-3xl mb-8" id="main-tabs">
           <button
             onClick={() => setCurrentTab("dashboard")}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
               currentTab === "dashboard"
                 ? "bg-white text-gray-900 shadow-sm"
                 : "text-gray-500 hover:text-gray-900 hover:bg-white/50"
@@ -670,10 +803,23 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
             <Users className="h-4 w-4" />
             {lang === "fa" ? "کاربران و اشتراک‌ها" : "Subscriptions"}
           </button>
+
+          <button
+            onClick={() => setCurrentTab("inbounds")}
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+              currentTab === "inbounds"
+                ? "bg-white text-gray-900 shadow-sm"
+                : "text-gray-500 hover:text-gray-900 hover:bg-white/50"
+            }`}
+          >
+            <Layers className="h-4 w-4 text-indigo-600" />
+            {lang === "fa" ? "اینباندها و سرورها" : "Inbounds / Nodes"}
+            <span className="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 py-0.2 rounded-full font-mono">{inbounds.length}</span>
+          </button>
           
           <button
             onClick={() => setCurrentTab("panels")}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
               currentTab === "panels"
                 ? "bg-white text-gray-900 shadow-sm"
                 : "text-gray-500 hover:text-gray-900 hover:bg-white/50"
@@ -685,7 +831,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
           <button
             onClick={() => setCurrentTab("converter")}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
               currentTab === "converter"
                 ? "bg-white text-gray-900 shadow-sm"
                 : "text-gray-500 hover:text-gray-900 hover:bg-white/50"
@@ -697,7 +843,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
           <button
             onClick={() => setCurrentTab("settings")}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
               currentTab === "settings"
                 ? "bg-white text-gray-900 shadow-sm"
                 : "text-gray-500 hover:text-gray-900 hover:bg-white/50"
@@ -709,7 +855,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
           <button
             onClick={() => setCurrentTab("manuals")}
-            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs sm:text-sm font-semibold transition-all ${
               currentTab === "manuals"
                 ? "bg-white text-gray-900 shadow-sm"
                 : "text-gray-500 hover:text-gray-900 hover:bg-white/50"
@@ -992,6 +1138,52 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                   {/* Connection Profiles & Device Tabs Selector */}
                   <div className="space-y-4">
+                    {/* Multi-Inbound Selector */}
+                    <div className="bg-slate-50 border border-slate-200/90 rounded-2xl p-3.5 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <Layers className="h-4 w-4 text-indigo-600" />
+                          <span className="text-xs font-bold text-slate-800">
+                            {lang === "fa" ? "اینباند / سرور فعال برای ساخت کانفیگ:" : "Active Inbound / Node for Configuration:"}
+                          </span>
+                        </div>
+                        <button 
+                          onClick={() => setCurrentTab("inbounds")}
+                          className="text-[10px] text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-0.5"
+                        >
+                          <Plus className="h-3 w-3" />
+                          {lang === "fa" ? "مدیریت اینباندها" : "Manage Inbounds"}
+                        </button>
+                      </div>
+
+                      <div className="flex flex-wrap gap-1.5">
+                        {inbounds.length === 0 ? (
+                          <div className="text-[10px] text-slate-400 italic">
+                            {lang === "fa" ? "هیچ اینباندی تعریف نشده است. از نود پیش‌فرض سرور استفاده می‌شود." : "No inbounds defined. Using default server."}
+                          </div>
+                        ) : (
+                          inbounds.map((inb) => {
+                            const isActive = (selectedInboundId === inb.id) || (!selectedInboundId && inb === inbounds[0]);
+                            return (
+                              <button
+                                key={inb.id}
+                                onClick={() => setSelectedInboundId(inb.id)}
+                                className={`px-2.5 py-1 rounded-xl text-[10px] font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                                  isActive
+                                    ? "bg-indigo-600 text-white shadow-xs"
+                                    : "bg-white text-slate-700 hover:bg-slate-100 border border-slate-200"
+                                }`}
+                              >
+                                <span className={`h-2 w-2 rounded-full ${isActive ? "bg-emerald-300" : "bg-slate-400"}`}></span>
+                                <span>{inb.tag}</span>
+                                <span className="text-[9px] opacity-75 font-mono">({inb.serverIp})</span>
+                              </button>
+                            );
+                          })
+                        )}
+                      </div>
+                    </div>
+
                     {/* Device Selector Bar */}
                     <div className="flex items-center gap-1.5 p-1 bg-gray-100/80 rounded-xl overflow-x-auto text-[11px] font-bold">
                       <button
@@ -1374,13 +1566,34 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                             </p>
                           </div>
                           
-                          <div className="flex gap-1.5">
+                          <div className="flex flex-wrap gap-1.5">
                             <button
-                              onClick={() => downloadBlob(`WireGuard_${selectedSub.username}.conf`, getWireguardConf(selectedSub), "text/plain")}
+                              onClick={() => {
+                                const inb = getActiveInbound();
+                                downloadBlob(`WireGuard_${inb?.tag || 'Default'}_${selectedSub.username}.conf`, getWireguardConf(selectedSub, inb), "text/plain");
+                              }}
                               className="bg-emerald-600 text-white hover:bg-emerald-700 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
                             >
                               <Download className="h-3 w-3" />
-                              <span>{lang === "fa" ? "دانلود .conf" : "Download .conf"}</span>
+                              <span>{lang === "fa" ? "دانلود .conf این اینباند" : "Download .conf"}</span>
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (inbounds.length <= 1) {
+                                  downloadBlob(`WireGuard_${selectedSub.username}.conf`, getWireguardConf(selectedSub), "text/plain");
+                                } else {
+                                  inbounds.forEach((inb, idx) => {
+                                    setTimeout(() => {
+                                      downloadBlob(`WireGuard_${inb.tag}_${selectedSub.username}.conf`, getWireguardConf(selectedSub, inb), "text/plain");
+                                    }, idx * 250);
+                                  });
+                                }
+                              }}
+                              className="bg-emerald-800 text-white hover:bg-emerald-900 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
+                              title={lang === "fa" ? "دانلود مجزای فایل کانفیگ برای هر اینباند" : "Download configs for all configured inbounds"}
+                            >
+                              <Download className="h-3 w-3" />
+                              <span>{lang === "fa" ? `دانلود همه اینباندها (${inbounds.length})` : `All Inbounds (${inbounds.length})`}</span>
                             </button>
                             <button
                               onClick={() => triggerCopy(getWireguardConf(selectedSub), "wg_full_conf")}
@@ -1540,13 +1753,36 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                               {lang === "fa" ? "دانلود پروفایل با گواهی‌های رمزنگاری اختصاصی کلاینت:" : "Download the complete single-file .ovpn with embedded certificates:"}
                             </p>
                           </div>
-                          <button
-                            onClick={() => downloadBlob(`OpenVPN_${selectedSub.username}.ovpn`, getOpenVpnConfig(selectedSub), "text/plain")}
-                            className="bg-amber-600 text-white hover:bg-amber-700 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
-                          >
-                            <Download className="h-3 w-3" />
-                            <span>{lang === "fa" ? "دانلود فایل .ovpn" : "Download .ovpn"}</span>
-                          </button>
+                          <div className="flex flex-wrap gap-1.5">
+                            <button
+                              onClick={() => {
+                                const inb = getActiveInbound();
+                                downloadBlob(`OpenVPN_${inb?.tag || 'Default'}_${selectedSub.username}.ovpn`, getOpenVpnConfig(selectedSub, inb), "text/plain");
+                              }}
+                              className="bg-amber-600 text-white hover:bg-amber-700 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
+                            >
+                              <Download className="h-3 w-3" />
+                              <span>{lang === "fa" ? "دانلود فایل .ovpn این اینباند" : "Download .ovpn"}</span>
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (inbounds.length <= 1) {
+                                  downloadBlob(`OpenVPN_${selectedSub.username}.ovpn`, getOpenVpnConfig(selectedSub), "text/plain");
+                                } else {
+                                  inbounds.forEach((inb, idx) => {
+                                    setTimeout(() => {
+                                      downloadBlob(`OpenVPN_${inb.tag}_${selectedSub.username}.ovpn`, getOpenVpnConfig(selectedSub, inb), "text/plain");
+                                    }, idx * 250);
+                                  });
+                                }
+                              }}
+                              className="bg-amber-800 text-white hover:bg-amber-900 px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 shadow-xs transition-all"
+                              title={lang === "fa" ? "دانلود مجزای فایل OpenVPN برای هر اینباند" : "Download OpenVPN profiles for all configured inbounds"}
+                            >
+                              <Download className="h-3 w-3" />
+                              <span>{lang === "fa" ? `دانلود همه اینباندها (${inbounds.length})` : `All Inbounds (${inbounds.length})`}</span>
+                            </button>
+                          </div>
                         </div>
 
                         <div className="grid grid-cols-2 gap-2 text-[10px] bg-white p-2.5 rounded-xl border border-gray-150 font-sans">
@@ -1591,6 +1827,269 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                 </div>
               )}
 
+            </div>
+          </div>
+        )}
+
+        {/* ==================== TAB: INBOUNDS (MULTI-INBOUND NODES MANAGEMENT) ==================== */}
+        {currentTab === "inbounds" && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+            {/* Left Column: List of Inbound Nodes (7 Cols) */}
+            <div className="lg:col-span-7 space-y-6">
+              <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+                <div className="flex items-center justify-between mb-4 border-b border-gray-100 pb-3">
+                  <div className="flex items-center gap-2">
+                    <div className="bg-indigo-50 p-2 rounded-xl text-indigo-600">
+                      <Layers className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-gray-900">
+                        {lang === "fa" ? "اینباندهای فعال و نودهای شبکه" : "Active Inbound Nodes"}
+                      </h3>
+                      <p className="text-[10px] text-gray-500">
+                        {lang === "fa" ? "به ازای هر اینباند ثبت‌شده، کانفیگ اختصاصی WireGuard، OpenVPN و L2TP برای تمام کاربران تولید می‌شود." : "Each inbound produces matching WireGuard, OpenVPN, and L2TP configs for every subscription."}
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-xs bg-indigo-50 text-indigo-700 font-bold px-2.5 py-1 rounded-full font-mono">
+                    {inbounds.length} {lang === "fa" ? "اینباند" : "Inbounds"}
+                  </span>
+                </div>
+
+                {loadingInbounds ? (
+                  <div className="p-8 text-center">
+                    <RefreshCw className="h-6 w-6 animate-spin mx-auto text-gray-300" />
+                  </div>
+                ) : inbounds.length === 0 ? (
+                  <div className="p-12 text-center text-gray-400 border border-dashed border-gray-100 rounded-xl">
+                    <Layers className="h-10 w-10 mx-auto text-gray-200 mb-2" />
+                    <p className="text-xs font-semibold">{lang === "fa" ? "هیچ اینباندی تعریف نشده است" : "No inbounds defined"}</p>
+                    <p className="text-[10px] text-gray-400 mt-1">{lang === "fa" ? "از فرم سمت راست برای تعریف اینباند جدید استفاده کنید." : "Use the form on the right to add inbounds."}</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {inbounds.map((inb) => (
+                      <div 
+                        key={inb.id} 
+                        className={`border rounded-2xl p-4 transition-all ${
+                          selectedInboundId === inb.id ? "bg-indigo-50/40 border-indigo-200 shadow-xs" : "bg-[#F9FAFB]/50 border-gray-100 hover:border-gray-200"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
+                            <span className="font-bold text-gray-900 text-xs">{inb.tag}</span>
+                            {inb.isDefault && (
+                              <span className="text-[9px] bg-indigo-100 text-indigo-700 font-bold px-2 py-0.5 rounded-full">
+                                {lang === "fa" ? "پیش‌فرض" : "Default"}
+                              </span>
+                            )}
+                          </div>
+                          
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                setSelectedInboundId(inb.id);
+                                setCurrentTab("dashboard");
+                              }}
+                              className="text-[10px] bg-white border border-gray-200 text-indigo-600 hover:bg-indigo-50 px-2.5 py-1 rounded-xl font-bold transition-all"
+                            >
+                              {lang === "fa" ? "مشاهده کانفیگ‌ها" : "View Configs"}
+                            </button>
+                            <button
+                              onClick={(e) => handleDeleteInbound(inb.id, e)}
+                              className="p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                              title={lang === "fa" ? "حذف اینباند" : "Delete"}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Inbound Specs Grid */}
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] mt-2">
+                          <div className="bg-white p-2 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[8px] font-bold">Server IP</span>
+                            <code className="font-mono text-gray-800 break-all">{inb.serverIp}</code>
+                          </div>
+                          <div className="bg-white p-2 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[8px] font-bold">WireGuard Port</span>
+                            <code className="font-mono text-emerald-700 font-bold">{inb.wgPort || inb.port || 51820}</code>
+                          </div>
+                          <div className="bg-white p-2 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[8px] font-bold">OpenVPN Port</span>
+                            <code className="font-mono text-amber-700 font-bold">{inb.openvpnPort || 1194} ({inb.openvpnProto || "udp"})</code>
+                          </div>
+                          <div className="bg-white p-2 rounded-xl border border-gray-150">
+                            <span className="text-gray-400 block text-[8px] font-bold">L2TP PSK</span>
+                            <code className="font-mono text-gray-700 truncate block">{inb.l2tpPsk || "SanaeiL2TPSecureKey"}</code>
+                          </div>
+                        </div>
+
+                        {inb.notes && (
+                          <p className="text-[10px] text-gray-400 mt-2 bg-white/60 p-1.5 rounded-lg border border-gray-100">
+                            💬 {inb.notes}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Multi-Inbound Technical Architecture Card */}
+              <div className="bg-gradient-to-br from-indigo-900 to-slate-900 text-white rounded-2xl p-6 shadow-sm space-y-3">
+                <div className="flex items-center gap-2">
+                  <Zap className="h-5 w-5 text-amber-400" />
+                  <h4 className="text-sm font-bold">
+                    {lang === "fa" ? "مکانیزم تولید خودکار چند اینباندی (Multi-Inbound Mapping)" : "How Multi-Inbound 1:1 Generation Works"}
+                  </h4>
+                </div>
+                <p className="text-xs text-indigo-200 leading-relaxed">
+                  {lang === "fa"
+                    ? "زمانی که شما چندین اینباند (مثلاً سرور آلمان، سرور فرانسه و سرور ترکیه) تعریف می‌کنید، سامانه به ازای هر کاربر فعال، برای تمام اینباندها فایل‌های جداگانه WireGuard (.conf)، OpenVPN (.ovpn) و پروفایل‌های L2TP تولید می‌کند. با زدن دکمه «دانلود همه اینباندها» تمام فایل‌های متناظر یکجا دانلود می‌شوند."
+                    : "When multiple inbounds are configured, the engine dynamically generates separate WireGuard (.conf), OpenVPN (.ovpn), and L2TP configs for each inbound for every subscriber."}
+                </p>
+                <div className="pt-1">
+                  <button
+                    onClick={() => setShowFeasibilityModal(true)}
+                    className="text-xs font-bold text-amber-300 hover:underline flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>{lang === "fa" ? "مطالعه توضیحات تکمیلی معماری و نحوه عملکرد پروتکل‌ها ←" : "Read Full Technical Protocol Feasibility Guide →"}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Right Column: Register New Inbound Form (5 Cols) */}
+            <div className="lg:col-span-5 space-y-6">
+              <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+                <div className="flex items-center gap-2 mb-4 border-b border-gray-100 pb-3">
+                  <div className="bg-indigo-50 p-2 rounded-xl text-indigo-600">
+                    <Plus className="h-4 w-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-gray-900">
+                      {lang === "fa" ? "افزودن اینباند / سرور جدید" : "Register New Inbound Node"}
+                    </h3>
+                    <p className="text-[10px] text-gray-500">
+                      {lang === "fa" ? "مشخصات پورت و آی‌پی اینباند را وارد کنید" : "Enter inbound connection parameters"}
+                    </p>
+                  </div>
+                </div>
+
+                <form onSubmit={handleCreateInbound} className="space-y-3.5 text-xs">
+                  <div>
+                    <label className="block text-gray-700 font-bold mb-1">
+                      {lang === "fa" ? "نام / تگ اینباند (Tag / Name):" : "Inbound Tag / Name:"}
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder={lang === "fa" ? "مثال: Germany-Node-1" : "e.g. Frankfurt-Inbound-1"}
+                      value={newInboundTag}
+                      onChange={(e) => setNewInboundTag(e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-sans"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-gray-700 font-bold mb-1">
+                      {lang === "fa" ? "آدرس آی‌پی سرور (Server IP or Domain):" : "Server IP or Domain:"}
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder={lang === "fa" ? "مثال: 198.51.100.25 یا de.yourdomain.com" : "e.g. 198.51.100.25"}
+                      value={newInboundServerIp}
+                      onChange={(e) => setNewInboundServerIp(e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-mono"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-gray-700 font-bold mb-1">
+                        {lang === "fa" ? "پورت وایرگارد (WG Port):" : "WireGuard Port:"}
+                      </label>
+                      <input
+                        type="number"
+                        value={newInboundWgPort}
+                        onChange={(e) => setNewInboundWgPort(parseInt(e.target.value) || 51820)}
+                        className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-gray-700 font-bold mb-1">
+                        {lang === "fa" ? "پورت OpenVPN:" : "OpenVPN Port:"}
+                      </label>
+                      <input
+                        type="number"
+                        value={newInboundOpenvpnPort}
+                        onChange={(e) => setNewInboundOpenvpnPort(parseInt(e.target.value) || 1194)}
+                        className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-gray-700 font-bold mb-1">
+                        {lang === "fa" ? "پروتکل OpenVPN:" : "OpenVPN Proto:"}
+                      </label>
+                      <select
+                        value={newInboundOpenvpnProto}
+                        onChange={(e) => setNewInboundOpenvpnProto(e.target.value as 'udp' | 'tcp')}
+                        className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-sans"
+                      >
+                        <option value="udp">UDP (Fastest)</option>
+                        <option value="tcp">TCP (Reliable)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-gray-700 font-bold mb-1">
+                        {lang === "fa" ? "کلید IPSec PSK:" : "L2TP PSK Secret:"}
+                      </label>
+                      <input
+                        type="text"
+                        value={newInboundL2tpPsk}
+                        onChange={(e) => setNewInboundL2tpPsk(e.target.value)}
+                        className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-gray-700 font-bold mb-1">
+                      {lang === "fa" ? "توضیحات اختیاری (Notes):" : "Notes (Optional):"}
+                    </label>
+                    <input
+                      type="text"
+                      placeholder={lang === "fa" ? "مثال: نود پرسرعت با کمترین پینگ" : "e.g. High speed German node"}
+                      value={newInboundNotes}
+                      onChange={(e) => setNewInboundNotes(e.target.value)}
+                      className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:bg-white focus:border-indigo-500 focus:outline-none transition-all font-sans"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={isCreatingInbound}
+                    className="w-full mt-2 bg-indigo-600 text-white font-bold py-2.5 rounded-xl hover:bg-indigo-700 transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                  >
+                    {isCreatingInbound ? (
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <>
+                        <Plus className="h-4 w-4" />
+                        <span>{lang === "fa" ? "ثبت اینباند جدید" : "Add Inbound"}</span>
+                      </>
+                    )}
+                  </button>
+                </form>
+              </div>
             </div>
           </div>
         )}
@@ -2608,6 +3107,148 @@ def create_customer_subscription(user_id, username):
         )}
 
       </main>
+
+      {/* Feasibility & Architecture Guide Modal */}
+      {showFeasibilityModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-3xl w-full max-h-[90vh] overflow-y-auto shadow-2xl border border-gray-100 p-6 space-y-6">
+            <div className="flex items-center justify-between border-b border-gray-100 pb-4">
+              <div className="flex items-center gap-2.5">
+                <div className="bg-indigo-50 p-2.5 rounded-2xl text-indigo-600">
+                  <Zap className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-gray-900">
+                    {lang === "fa" ? "بررسی فنی، امکان‌پذیری و راهنمای کارکرد پروتکل‌ها" : "Technical Architecture & Protocol Feasibility"}
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    {lang === "fa" ? "بررسی تداخل‌ها، حل خطاهای ایمپورت و نحوه همگام‌سازی با ۳ایکس‌یوآی" : "Protocol isolation, import troubleshooting & 3x-ui multi-inbound mapping"}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowFeasibilityModal(false)}
+                className="text-gray-400 hover:text-gray-900 bg-gray-100 hover:bg-gray-200 p-2 rounded-xl transition-all"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-5 text-xs text-gray-700 leading-relaxed font-sans">
+              
+              {/* Question 1: Is it technically possible? */}
+              <div className="bg-emerald-50/60 border border-emerald-200 rounded-2xl p-4 space-y-2">
+                <div className="flex items-center gap-2">
+                  <Check className="h-4 w-4 text-emerald-600 stroke-[3px]" />
+                  <h4 className="font-bold text-emerald-950 text-sm">
+                    {lang === "fa" ? "۱. آیا اجرای همزمان WireGuard، OpenVPN و L2TP شدنی است؟" : "1. Is simultaneous WireGuard, OpenVPN & L2TP feasible?"}
+                  </h4>
+                </div>
+                <p className="text-emerald-900">
+                  {lang === "fa"
+                    ? "بله! ۱۰۰٪ شدنی و کاملاً استاندارد لینوکس است. این پروتکل‌ها هیچ تداخلی با یکدیگر یا با ۳ایکس‌یوآی (Xray) ندارند، زیرا هرکدام از اینترفیس شبکه و پورت کاملاً مجزای خود استفاده می‌کنند:"
+                    : "Yes! 100% standard and feasible. Each protocol runs isolated on its own network interface and dedicated ports without colliding with 3x-ui (Xray):"}
+                </p>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 text-[11px] font-mono">
+                  <div className="bg-white p-2.5 rounded-xl border border-emerald-200 shadow-xs">
+                    <span className="text-emerald-600 block font-bold text-[9px]">WireGuard</span>
+                    <strong className="text-gray-900">UDP 51820</strong>
+                    <span className="text-gray-400 block text-[9px] mt-0.5">Interface: wg0</span>
+                  </div>
+
+                  <div className="bg-white p-2.5 rounded-xl border border-emerald-200 shadow-xs">
+                    <span className="text-amber-600 block font-bold text-[9px]">OpenVPN</span>
+                    <strong className="text-gray-900">UDP 1194</strong>
+                    <span className="text-gray-400 block text-[9px] mt-0.5">Interface: tun0</span>
+                  </div>
+
+                  <div className="bg-white p-2.5 rounded-xl border border-emerald-200 shadow-xs">
+                    <span className="text-indigo-600 block font-bold text-[9px]">L2TP/IPSec</span>
+                    <strong className="text-gray-900">UDP 500,4500,1701</strong>
+                    <span className="text-gray-400 block text-[9px] mt-0.5">Interface: ppp0</span>
+                  </div>
+
+                  <div className="bg-white p-2.5 rounded-xl border border-emerald-200 shadow-xs">
+                    <span className="text-purple-600 block font-bold text-[9px]">3x-ui / Xray</span>
+                    <strong className="text-gray-900">TCP/UDP 443/80</strong>
+                    <span className="text-gray-400 block text-[9px] mt-0.5">VLESS / VMess</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Question 2: Why were they failing previously? */}
+              <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 space-y-3">
+                <h4 className="font-bold text-gray-900 text-sm flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-indigo-600" />
+                  {lang === "fa" ? "۲. دلایل خطای ایمپورت و عدم اتصال و چگونگی رفع آن‌ها:" : "2. Root Causes of Previous Import Errors & Resolutions:"}
+                </h4>
+
+                <div className="space-y-2.5 text-[11px]">
+                  <div className="bg-white p-3 rounded-xl border border-gray-150 space-y-1">
+                    <strong className="text-gray-900 block flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-emerald-500"></span>
+                      {lang === "fa" ? "حل خطای بارکد و ایمپورت WireGuard:" : "WireGuard Import & QR Code Fix:"}
+                    </strong>
+                    <p className="text-gray-600">
+                      {lang === "fa"
+                        ? "در کلاینت WireGuard اگر ساختار فایل .conf فاقد کلید خصوصی و هدرهای [Interface] یا [Peer] باشد، بارکد اسکن نمی‌شود. اکنون خروجی QR و فایل‌های .conf دقیقاً با سینتکس رسمی Curve25519 و پارامترهای استاندارد تولید می‌شوند و مستقیماً با دوربین برنامه WireGuard گوشی باز می‌شوند."
+                        : "WireGuard mobile clients require exact RFC syntax with [Interface] and [Peer] blocks. The QR code generator now encodes the full raw config directly for seamless instant scanning."}
+                    </p>
+                  </div>
+
+                  <div className="bg-white p-3 rounded-xl border border-gray-150 space-y-1">
+                    <strong className="text-gray-900 block flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-amber-500"></span>
+                      {lang === "fa" ? "حل خطای ایمپورت OpenVPN:" : "OpenVPN Certificate Embedding Fix:"}
+                    </strong>
+                    <p className="text-gray-600">
+                      {lang === "fa"
+                        ? "فایل‌های .ovpn در صورتی که گواهی‌ها را به صورت فایل جدا بخواهند، در گوشی خطای Missing Certificate می‌دهند. ما فایل‌های .ovpn را به صورت Single-File Inline (شامل تگ‌های <ca>، <cert>، <key> و <tls-auth>) تولید کرده‌ایم تا با یک کلیک در OpenVPN Connect ایمپورت شوند."
+                        : "OpenVPN profiles now include all inline cryptographic certificates (<ca>, <cert>, <key>, <tls-auth>) in a single self-contained .ovpn file for 1-click import in OpenVPN Connect."}
+                    </p>
+                  </div>
+
+                  <div className="bg-white p-3 rounded-xl border border-gray-150 space-y-1">
+                    <strong className="text-gray-900 block flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full bg-indigo-500"></span>
+                      {lang === "fa" ? "حل مشکل L2TP در سرور لینوکس:" : "L2TP Linux System Daemons:"}
+                    </strong>
+                    <p className="text-gray-600">
+                      {lang === "fa"
+                        ? "پنل 3x-ui ذاتاً دیمون L2TP ندارد. برای کارکرد L2TP، گزینه ۳ در اسکریپت install.sh پکیج‌های strongswan و xl2tpd را نصب و فایل /etc/ppp/chap-secrets را با دیتابیس کاربران همگام‌سازی می‌کند."
+                        : "3x-ui manages Xray core and does not manage system L2TP daemons. Our install.sh (Option 3) sets up strongswan & xl2tpd and syncs /etc/ppp/chap-secrets automatically."}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Multi-Inbound Feature explanation */}
+              <div className="bg-indigo-50/70 border border-indigo-200 rounded-2xl p-4 space-y-2">
+                <h4 className="font-bold text-indigo-950 text-sm flex items-center gap-2">
+                  <Layers className="h-4 w-4 text-indigo-600" />
+                  {lang === "fa" ? "۳. نحوه عملکرد چند اینباندی (Multi-Inbound 1:1 Mapping):" : "3. Multi-Inbound 1:1 Automated Mapping:"}
+                </h4>
+                <p className="text-indigo-900 text-[11px]">
+                  {lang === "fa"
+                    ? "به ازای هر اینباندی که در تب «اینباندها و سرورها» تعریف کنید، تمام کاربران به آن متصل خواهند بود. شما می‌توانید هم از منوی کاربری کانفیگ اینباند مدنظر را دانلود کنید و هم با زدن دکمه «دانلود همه اینباندها»، تمام فایل‌های WireGuard یا OpenVPN مربوط به آن کاربر برای تمام نودها را در چند ثانیه به صورت خودکار دریافت کنید."
+                    : "For every inbound added in the Inbounds tab, dedicated configs are generated for every subscriber. You can download individual configs or use the 'All Inbounds' button to retrieve all node configs at once."}
+                </p>
+              </div>
+
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-gray-100">
+              <button
+                onClick={() => setShowFeasibilityModal(false)}
+                className="bg-indigo-600 text-white font-bold px-5 py-2 rounded-xl text-xs hover:bg-indigo-700 transition-all shadow-sm cursor-pointer"
+              >
+                {lang === "fa" ? "متوجه شدم و بستن راهنما" : "Got it / Close"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Footer */}
       <footer className="bg-white border-t border-gray-100 py-6 mt-12 transition-all">
