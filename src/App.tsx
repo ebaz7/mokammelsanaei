@@ -184,9 +184,11 @@ export default function App() {
     // If bridge routing is enabled and not explicitly bypassed, client MUST connect to this bridge server
     if (bridgeRoutingEnabled && !forceDirect) {
       let bHost = (bridgeServerHost || "").trim();
-      if (!bHost || bHost === "127.0.0.1" || bHost === "142.250.74.46") {
+      if (!bHost || bHost === "127.0.0.1" || bHost === "localhost" || bHost === "142.250.74.46") {
         if (typeof window !== "undefined" && window.location.hostname && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
           bHost = window.location.hostname;
+        } else if (detectedPublicIp && detectedPublicIp !== "127.0.0.1") {
+          bHost = detectedPublicIp;
         }
       }
       if (bHost) {
@@ -195,7 +197,7 @@ export default function App() {
     }
 
     let host = (inboundHost || subHost || l2tpServerIpState || detectedPublicIp || "").trim();
-    if (!host || host === "127.0.0.1" || host === "142.250.74.46") {
+    if (!host || host === "127.0.0.1" || host === "localhost" || host === "142.250.74.46") {
       if (typeof window !== "undefined" && window.location.hostname && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
         host = window.location.hostname;
       }
@@ -216,9 +218,11 @@ export default function App() {
   const getWireguardConf = (sub: SmartSubscription, customInbound?: InboundNode | null, forceDirect?: boolean) => {
     if (!sub) return "";
     const inb = customInbound || getActiveInbound();
+    const inbIdx = inbounds.findIndex((i) => i.id === inb?.id);
+    const safeIdx = inbIdx >= 0 ? inbIdx : 0;
     const isBridge = bridgeRoutingEnabled && !forceDirect;
     const priv = ensureValidWgKey(sub.wireguardPrivateKey, `sub_priv_${sub.id || sub.username}`);
-    const addr = sub.wireguardAddress && sub.wireguardAddress.includes("/") ? sub.wireguardAddress : "10.8.0.2/24";
+    const addr = isBridge ? `10.8.${safeIdx}.2/24` : (sub.wireguardAddress && sub.wireguardAddress.includes("/") ? sub.wireguardAddress : "10.8.0.2/24");
     const dns = sub.wireguardDns || wgServerDnsState || "1.1.1.1, 8.8.8.8";
     
     // Server Public Key
@@ -227,13 +231,13 @@ export default function App() {
     
     // Clean Host/IP (Points to Bridge Server if bridge is active)
     const rawHost = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp, forceDirect);
-    const serverPort = inb?.wgPort || inb?.port || wgServerPortState || 51820;
+    const serverPort = isBridge ? (inb?.bridgeWgPort || inb?.wgPort || (51820 + safeIdx)) : (inb?.wgPort || inb?.port || wgServerPortState || 51820);
     
     return `# -----------------------------------------------------------------
 # Sanaei Smart Sub - WireGuard Client Profile
-# Routing Mode: ${isBridge ? `🌉 Bridge Gateway (Encapsulated -> ${inb?.tag || '3x-ui Node'})` : '⚡ Direct Remote Node'}
-# Ingress Host: ${rawHost} (Client connects here)
-# Egress Target: ${inb?.serverIp || 'Remote Node'} (${inb?.tag || 'Sanaei Inbound'})
+# Routing Mode: ${isBridge ? `🌉 Dedicated Bridge Inbound [Port ${serverPort} -> ${inb?.tag || 'Sanaei Node'}]` : '⚡ Direct Remote Node'}
+# Ingress Gateway: ${rawHost}:${serverPort}
+# Direct Target Egress: ${inb?.serverIp || 'Remote Node'}:${inb?.port || 443} (${inb?.tag || 'Sanaei Inbound'})
 # -----------------------------------------------------------------
 [Interface]
 PrivateKey = ${priv}
@@ -350,18 +354,20 @@ CustomDialFunc=
   const getOpenVpnConfig = (sub: SmartSubscription, customInbound?: InboundNode | null, forceDirect?: boolean) => {
     if (!sub) return "";
     const inb = customInbound || getActiveInbound();
+    const inbIdx = inbounds.findIndex((i) => i.id === inb?.id);
+    const safeIdx = inbIdx >= 0 ? inbIdx : 0;
     const isBridge = bridgeRoutingEnabled && !forceDirect;
     const serverIp = resolveEffectiveHost(inb?.serverIp, sub.l2tpServerIp, forceDirect);
-    const port = inb?.openvpnPort || sub.openvpnPort || 1194;
+    const port = isBridge ? (inb?.bridgeOpenvpnPort || inb?.openvpnPort || (1194 + safeIdx)) : (inb?.openvpnPort || sub.openvpnPort || 1194);
     const proto = inb?.openvpnProto || sub.openvpnProto || "udp";
     const user = sub.openvpnUser || `vpn_${sub.username || "user"}`;
     const pass = sub.openvpnPass || "SanaeiOVPNPass";
     
     return `# -----------------------------------------------------------------
 # Sanaei Smart Sub - OpenVPN Profile
-# Routing Mode: ${isBridge ? `🌉 Bridge Gateway (Encapsulated -> ${inb?.tag || '3x-ui Node'})` : '⚡ Direct Remote Node'}
-# Ingress Host: ${serverIp} (Client connects here)
-# Egress Target: ${inb?.serverIp || 'Remote Node'} (${inb?.tag || 'Sanaei Inbound'})
+# Routing Mode: ${isBridge ? `🌉 Dedicated Bridge Inbound [Port ${port} -> ${inb?.tag || 'Sanaei Node'}]` : '⚡ Direct Remote Node'}
+# Ingress Gateway: ${serverIp}:${port}
+# Direct Target Egress: ${inb?.serverIp || 'Remote Node'}:${inb?.port || 443} (${inb?.tag || 'Sanaei Inbound'})
 # -----------------------------------------------------------------
 client
 dev tun
@@ -1494,20 +1500,36 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                   <div className="space-y-4">
                     {/* Multi-Inbound Selector */}
                     <div className="bg-slate-50 border border-slate-200/90 rounded-2xl p-3.5 space-y-2.5">
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
                         <div className="flex items-center gap-1.5">
                           <Layers className="h-4 w-4 text-indigo-600" />
                           <span className="text-xs font-bold text-slate-800">
-                            {lang === "fa" ? "اینباند / سرور فعال برای ساخت کانفیگ:" : "Active Inbound / Node for Configuration:"}
+                            {lang === "fa" 
+                              ? (bridgeRoutingEnabled ? "نود مقصد سنایی برای خروج ترافیک از پل:" : "اینباند / سرور فعال برای ساخت کانفیگ:") 
+                              : (bridgeRoutingEnabled ? "Egress Sanaei Node via Bridge:" : "Active Inbound / Node for Configuration:")}
                           </span>
                         </div>
-                        <button 
-                          onClick={() => setCurrentTab("inbounds")}
-                          className="text-[10px] text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-0.5"
-                        >
-                          <Plus className="h-3 w-3" />
-                          {lang === "fa" ? "مدیریت اینباندها" : "Manage Inbounds"}
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleSaveBridgeConfig(!bridgeRoutingEnabled)}
+                            className={`text-[10px] font-bold px-2.5 py-1 rounded-xl border transition-all flex items-center gap-1 cursor-pointer ${
+                              bridgeRoutingEnabled 
+                                ? "bg-amber-100 text-amber-900 border-amber-300" 
+                                : "bg-gray-100 text-gray-700 border-gray-300"
+                            }`}
+                            title={lang === "fa" ? "تغییر حالت بین مسیریابی پل و اتصال مستقیم" : "Toggle Bridge vs Direct"}
+                          >
+                            <span>🌉</span>
+                            <span>{bridgeRoutingEnabled ? (lang === "fa" ? `پل فعال: ورودی (${resolveEffectiveHost()})` : `Bridge: (${resolveEffectiveHost()})`) : (lang === "fa" ? "اتصال مستقیم" : "Direct Mode")}</span>
+                          </button>
+                          <button 
+                            onClick={() => setCurrentTab("inbounds")}
+                            className="text-[10px] text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-0.5"
+                          >
+                            <Plus className="h-3 w-3" />
+                            {lang === "fa" ? "مدیریت اینباندها" : "Manage Inbounds"}
+                          </button>
+                        </div>
                       </div>
 
                       <div className="flex flex-wrap gap-1.5">
@@ -1640,6 +1662,17 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           </button>
                         </div>
 
+                        {bridgeRoutingEnabled && (
+                          <div className="bg-amber-50 border border-amber-200 text-amber-900 text-[11px] p-2.5 rounded-xl flex items-center gap-2">
+                            <span className="text-sm">🌉</span>
+                            <span>
+                              {lang === "fa"
+                                ? `پل ارتباطی فعال است: آیفون با آدرس ورودی این پنل (${resolveEffectiveHost()}) متصل شده و ترافیک از نود سنایی (${getActiveInbound()?.tag || 'سنایی'}) خارج می‌شود.`
+                                : `Bridge Active: iPhone connects to (${resolveEffectiveHost()}) and exits via (${getActiveInbound()?.tag || 'Sanaei'}).`}
+                            </span>
+                          </div>
+                        )}
+
                         {/* iOS Exact Field List */}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px]">
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
@@ -1649,17 +1682,19 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <span className="text-gray-400 block text-[9px] font-bold">Description</span>
-                            <span className="font-mono text-gray-800">Sanaei L2TP ({getActiveInbound()?.tag || "Default"})</span>
+                            <span className="font-mono text-gray-800">Sanaei L2TP ({bridgeRoutingEnabled ? 'Bridge -> ' : ''}{getActiveInbound()?.tag || "Default"})</span>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
-                              <span className="text-gray-400 block text-[9px] font-bold">Server</span>
-                              <button onClick={() => triggerCopy(getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1", "ios_server")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
+                              <span className="text-gray-400 block text-[9px] font-bold">
+                                Server {bridgeRoutingEnabled ? <span className="text-amber-800 bg-amber-100 font-bold px-1.5 py-0.5 rounded text-[8px]">پل سرور (Bridge)</span> : null}
+                              </span>
+                              <button onClick={() => triggerCopy(resolveEffectiveHost(getActiveInbound()?.serverIp, selectedSub.l2tpServerIp), "ios_server")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "ios_server" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
-                            <code className="font-mono text-gray-800 break-all font-semibold">{getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1"}</code>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{resolveEffectiveHost(getActiveInbound()?.serverIp, selectedSub.l2tpServerIp)}</code>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
@@ -1706,7 +1741,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                         <div className="flex justify-end pt-1">
                           <button
                             onClick={() => {
-                              const srv = getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1";
+                              const srv = resolveEffectiveHost(getActiveInbound()?.serverIp, selectedSub.l2tpServerIp);
                               const psk = getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey";
                               triggerCopy(`Type: L2TP\nServer: ${srv}\nAccount: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}\nSecret: ${psk}\nSend All Traffic: ON`, "ios_all");
                             }}
@@ -1736,11 +1771,22 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           </div>
                         </div>
 
+                        {bridgeRoutingEnabled && (
+                          <div className="bg-amber-50 border border-amber-200 text-amber-900 text-[11px] p-2.5 rounded-xl flex items-center gap-2">
+                            <span className="text-sm">🌉</span>
+                            <span>
+                              {lang === "fa"
+                                ? `پل ارتباطی فعال است: گوشی اندروید به آدرس ورودی این پنل (${resolveEffectiveHost()}) متصل شده و ترافیک از نود سنایی (${getActiveInbound()?.tag || 'سنایی'}) خارج می‌شود.`
+                                : `Bridge Active: Android connects to (${resolveEffectiveHost()}) and exits via (${getActiveInbound()?.tag || 'Sanaei'}).`}
+                            </span>
+                          </div>
+                        )}
+
                         {/* Android Exact Field List */}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px]">
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <span className="text-gray-400 block text-[9px] font-bold">Name</span>
-                            <span className="font-mono text-gray-800 font-semibold">Sanaei L2TP ({getActiveInbound()?.tag || "Default"})</span>
+                            <span className="font-mono text-gray-800 font-semibold">Sanaei L2TP ({bridgeRoutingEnabled ? 'Bridge -> ' : ''}{getActiveInbound()?.tag || "Default"})</span>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
@@ -1751,12 +1797,14 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
-                              <span className="text-gray-400 block text-[9px] font-bold">Server address</span>
-                              <button onClick={() => triggerCopy(getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1", "and_server")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
+                              <span className="text-gray-400 block text-[9px] font-bold">
+                                Server address {bridgeRoutingEnabled ? <span className="text-amber-800 bg-amber-100 font-bold px-1.5 py-0.5 rounded text-[8px]">پل سرور (Bridge)</span> : null}
+                              </span>
+                              <button onClick={() => triggerCopy(resolveEffectiveHost(getActiveInbound()?.serverIp, selectedSub.l2tpServerIp), "and_server")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "and_server" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
-                            <code className="font-mono text-gray-800 break-all font-semibold">{getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1"}</code>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{resolveEffectiveHost(getActiveInbound()?.serverIp, selectedSub.l2tpServerIp)}</code>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
@@ -1803,7 +1851,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                         <div className="flex justify-end pt-1">
                           <button
                             onClick={() => {
-                              const srv = getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1";
+                              const srv = resolveEffectiveHost(getActiveInbound()?.serverIp, selectedSub.l2tpServerIp);
                               const psk = getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey";
                               triggerCopy(`Name: Sanaei L2TP\nType: L2TP/IPSec PSK\nServer address: ${srv}\nIPSec pre-shared key: ${psk}\nUsername: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}`, "and_all");
                             }}
@@ -1843,6 +1891,17 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           </button>
                         </div>
 
+                        {bridgeRoutingEnabled && (
+                          <div className="bg-amber-50 border border-amber-200 text-amber-900 text-[11px] p-2.5 rounded-xl flex items-center gap-2">
+                            <span className="text-sm">🌉</span>
+                            <span>
+                              {lang === "fa"
+                                ? `پل ارتباطی فعال است: ویندوز به آدرس ورودی این پنل (${resolveEffectiveHost()}) متصل شده و ترافیک از نود سنایی (${getActiveInbound()?.tag || 'سنایی'}) خارج می‌شود.`
+                                : `Bridge Active: Windows connects to (${resolveEffectiveHost()}) and exits via (${getActiveInbound()?.tag || 'Sanaei'}).`}
+                            </span>
+                          </div>
+                        )}
+
                         {/* Windows Exact Field List */}
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 text-[11px]">
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
@@ -1852,17 +1911,19 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <span className="text-gray-400 block text-[9px] font-bold">Connection name</span>
-                            <span className="font-mono text-gray-800">Sanaei L2TP ({getActiveInbound()?.tag || "Default"})</span>
+                            <span className="font-mono text-gray-800">Sanaei L2TP ({bridgeRoutingEnabled ? 'Bridge -> ' : ''}{getActiveInbound()?.tag || "Default"})</span>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
                             <div className="flex items-center justify-between mb-0.5">
-                              <span className="text-gray-400 block text-[9px] font-bold">Server name or address</span>
-                              <button onClick={() => triggerCopy(getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1", "win_server")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
+                              <span className="text-gray-400 block text-[9px] font-bold">
+                                Server name or address {bridgeRoutingEnabled ? <span className="text-amber-800 bg-amber-100 font-bold px-1.5 py-0.5 rounded text-[8px]">پل سرور (Bridge)</span> : null}
+                              </span>
+                              <button onClick={() => triggerCopy(resolveEffectiveHost(getActiveInbound()?.serverIp, selectedSub.l2tpServerIp), "win_server")} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                 {copiedId === "win_server" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                               </button>
                             </div>
-                            <code className="font-mono text-gray-800 break-all font-semibold">{getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1"}</code>
+                            <code className="font-mono text-gray-800 break-all font-semibold">{resolveEffectiveHost(getActiveInbound()?.serverIp, selectedSub.l2tpServerIp)}</code>
                           </div>
 
                           <div className="bg-white p-2.5 rounded-xl border border-gray-150">
@@ -1909,7 +1970,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                         <div className="flex justify-end pt-1">
                           <button
                             onClick={() => {
-                              const srv = getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1";
+                              const srv = resolveEffectiveHost(getActiveInbound()?.serverIp, selectedSub.l2tpServerIp);
                               const psk = getActiveInbound()?.l2tpPsk || selectedSub.l2tpPsk || "SanaeiL2TPSecureKey";
                               triggerCopy(`VPN provider: Windows (built-in)\nServer name or address: ${srv}\nVPN type: L2TP/IPsec with pre-shared key\nPre-shared key: ${psk}\nUser name: ${selectedSub.l2tpUser}\nPassword: ${selectedSub.l2tpPass}`, "win_all");
                             }}
@@ -1977,6 +2038,17 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           </div>
                         </div>
 
+                        {bridgeRoutingEnabled && (
+                          <div className="bg-amber-50 border border-amber-200 text-amber-900 text-[11px] p-2.5 rounded-xl flex items-center gap-2">
+                            <span className="text-sm">🌉</span>
+                            <span>
+                              {lang === "fa"
+                                ? `پل وایروگارد فعال است: Endpoint به آدرس ورودی این پنل (${resolveEffectiveHost()}) اشاره می‌کند و پکت‌ها به سمت اینباند سنایی (${getActiveInbound()?.tag || 'سنایی'}) فوروارد می‌شوند.`
+                                : `WireGuard Bridge Active: Endpoint points to (${resolveEffectiveHost()}) and forwards to (${getActiveInbound()?.tag || 'Sanaei'}).`}
+                            </span>
+                          </div>
+                        )}
+
                         {/* Direct Working QR Code & Details */}
                         <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
                           {/* QR Box */}
@@ -2019,10 +2091,12 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                             <div className="bg-white p-2 rounded-xl border border-gray-150">
                               <div className="flex items-center justify-between mb-0.5">
-                                <span className="text-gray-400 font-bold text-[8px]">[Peer] Endpoint</span>
+                                <span className="text-gray-400 font-bold text-[8px]">
+                                  [Peer] Endpoint {bridgeRoutingEnabled ? <span className="text-amber-800 bg-amber-100 font-bold px-1 py-0.2 rounded text-[7px]">پل</span> : null}
+                                </span>
                                 <button onClick={() => {
                                   const inb = getActiveInbound();
-                                  const host = (inb?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1").replace(/^https?:\/\//i, "").split("/")[0].split(":")[0];
+                                  const host = resolveEffectiveHost(inb?.serverIp, selectedSub.l2tpServerIp);
                                   const port = inb?.wgPort || inb?.port || wgServerPortState || 51820;
                                   triggerCopy(`${host}:${port}`, "wg_end");
                                 }} className="text-gray-400 hover:text-gray-900 cursor-pointer">
@@ -2032,7 +2106,7 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                               <code className="font-mono text-gray-800 break-all text-[9px]">
                                 {(() => {
                                   const inb = getActiveInbound();
-                                  const host = (inb?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1").replace(/^https?:\/\//i, "").split("/")[0].split(":")[0];
+                                  const host = resolveEffectiveHost(inb?.serverIp, selectedSub.l2tpServerIp);
                                   const port = inb?.wgPort || inb?.port || wgServerPortState || 51820;
                                   return `${host}:${port}`;
                                 })()}
@@ -2181,13 +2255,26 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
                           </div>
                         </div>
 
+                        {bridgeRoutingEnabled && (
+                          <div className="bg-amber-50 border border-amber-200 text-amber-900 text-[11px] p-2.5 rounded-xl flex items-center gap-2">
+                            <span className="text-sm">🌉</span>
+                            <span>
+                              {lang === "fa"
+                                ? `پل OpenVPN فعال است: Remote به آدرس ورودی این پنل (${resolveEffectiveHost()}) متصل شده و ترافیک از نود سنایی (${getActiveInbound()?.tag || 'سنایی'}) خارج می‌شود.`
+                                : `OpenVPN Bridge Active: Remote connects to (${resolveEffectiveHost()}) and exits via (${getActiveInbound()?.tag || 'Sanaei'}).`}
+                            </span>
+                          </div>
+                        )}
+
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[10px] bg-white p-2.5 rounded-xl border border-gray-150 font-sans">
                           <div>
-                            <span className="text-gray-400 block text-[8px] font-bold mb-0.5">Remote Server & Port</span>
+                            <span className="text-gray-400 block text-[8px] font-bold mb-0.5">
+                              Remote Server & Port {bridgeRoutingEnabled ? <span className="text-amber-800 bg-amber-100 font-bold px-1 py-0.2 rounded text-[7px]">پل</span> : null}
+                            </span>
                             <div className="flex items-center justify-between">
-                              <code className="font-mono text-gray-700 break-all">{`${getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1"}:${getActiveInbound()?.openvpnPort || selectedSub.openvpnPort || 1194} (${getActiveInbound()?.openvpnProto || "udp"})`}</code>
+                              <code className="font-mono text-gray-700 break-all">{`${resolveEffectiveHost(getActiveInbound()?.serverIp, selectedSub.l2tpServerIp)}:${getActiveInbound()?.openvpnPort || selectedSub.openvpnPort || 1194} (${getActiveInbound()?.openvpnProto || "udp"})`}</code>
                               <button 
-                                onClick={() => triggerCopy(`${getActiveInbound()?.serverIp || selectedSub.l2tpServerIp || "127.0.0.1"}:${getActiveInbound()?.openvpnPort || selectedSub.openvpnPort || 1194}`, "ovpn_remote")}
+                                onClick={() => triggerCopy(`${resolveEffectiveHost(getActiveInbound()?.serverIp, selectedSub.l2tpServerIp)}:${getActiveInbound()?.openvpnPort || selectedSub.openvpnPort || 1194}`, "ovpn_remote")}
                                 className="text-gray-400 hover:text-gray-900 ml-1 cursor-pointer"
                               >
                                 {copiedId === "ovpn_remote" ? <Check className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
@@ -2851,44 +2938,71 @@ B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
 
                   <p className="text-xs text-gray-500">
                     {lang === "fa" 
-                      ? "مشخص کنید ترافیک کاربران پس از ورود به پل، از طریق کدام نود و اینباند پنل سنایی به اینترنت متصل شود:" 
-                      : "Select which remote 3x-ui inbound will act as the encrypted egress tunnel:"}
+                      ? "در این سامانه، برای هر اینباند یک تونل و پورت اختصاصی روی پل ایجاد می‌شود تا ترافیک هر اتصال دقیقاً از همان اینباند خارج شود:" 
+                      : "Each inbound has its own dedicated WireGuard/OpenVPN port and isolated Xray egress route on the bridge server:"}
                   </p>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                    {inbounds.map((inb) => {
+                  <div className="space-y-2.5 pt-1">
+                    {inbounds.map((inb, inbIdx) => {
                       const isSelected = (bridgeSelectedInboundId || inbounds[0]?.id) === inb.id;
+                      const wgDedicatedPort = inb.bridgeWgPort || inb.wgPort || (51820 + inbIdx);
+                      const ovpnDedicatedPort = inb.bridgeOpenvpnPort || inb.openvpnPort || (1194 + inbIdx);
+                      const socksDedicatedPort = inb.bridgeSocksPort || (10808 + inbIdx);
+                      const dedicatedSubnet = `10.8.${inbIdx}.0/24`;
+
                       return (
                         <div
                           key={inb.id}
                           onClick={() => setBridgeSelectedInboundId(inb.id)}
-                          className={`cursor-pointer p-3.5 rounded-2xl border transition-all text-xs flex flex-col justify-between space-y-2 ${
+                          className={`cursor-pointer p-4 rounded-2xl border transition-all text-xs flex flex-col space-y-2.5 ${
                             isSelected
-                              ? "bg-indigo-50/80 border-indigo-300 shadow-xs ring-2 ring-indigo-500/20"
+                              ? "bg-indigo-50/90 border-indigo-300 shadow-xs ring-2 ring-indigo-500/20"
                               : "bg-gray-50/60 border-gray-200 hover:border-gray-300 hover:bg-white"
                           }`}
                         >
                           <div className="flex items-center justify-between">
-                            <span className="font-bold text-gray-900 flex items-center gap-1.5">
+                            <span className="font-bold text-gray-900 flex items-center gap-1.5 text-xs">
                               <span>{inb.country === "DE" ? "🇩🇪" : inb.country === "FR" ? "🇫🇷" : inb.country === "NL" ? "🇳🇱" : inb.country === "FI" ? "🇫🇮" : inb.country === "TR" ? "🇹🇷" : "🌐"}</span>
-                              <span className="truncate max-w-[140px]">{inb.tag}</span>
+                              <span>{inb.tag}</span>
+                              <span className="text-[9px] bg-emerald-100 text-emerald-800 font-bold px-2 py-0.5 rounded-full">
+                                {lang === "fa" ? `مسیر اختصاصی #${inbIdx + 1}` : `Route #${inbIdx + 1}`}
+                              </span>
                             </span>
-                            <span className="text-[9px] uppercase font-mono font-bold px-1.5 py-0.5 rounded bg-white text-indigo-700 border border-indigo-100">
+                            <span className="text-[9px] uppercase font-mono font-bold px-2 py-0.5 rounded bg-white text-indigo-700 border border-indigo-100">
                               {inb.protocol}
                             </span>
                           </div>
 
-                          <div className="text-[10px] font-mono text-gray-500 flex items-center justify-between">
-                            <span>Host: {inb.serverIp}</span>
-                            <span>Port: {inb.port}</span>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] font-mono">
+                            <div className="bg-white/80 p-2 rounded-xl border border-gray-150">
+                              <span className="text-gray-400 block text-[8px] font-bold">WG Ingress Port</span>
+                              <span className="text-emerald-700 font-bold">{wgDedicatedPort}</span>
+                            </div>
+                            <div className="bg-white/80 p-2 rounded-xl border border-gray-150">
+                              <span className="text-gray-400 block text-[8px] font-bold">OVPN Ingress Port</span>
+                              <span className="text-amber-700 font-bold">{ovpnDedicatedPort}</span>
+                            </div>
+                            <div className="bg-white/80 p-2 rounded-xl border border-gray-150">
+                              <span className="text-gray-400 block text-[8px] font-bold">Isolated Subnet</span>
+                              <span className="text-indigo-700 font-semibold">{dedicatedSubnet}</span>
+                            </div>
+                            <div className="bg-white/80 p-2 rounded-xl border border-gray-150">
+                              <span className="text-gray-400 block text-[8px] font-bold">Target Sanaei Node</span>
+                              <span className="text-gray-800 font-semibold truncate block">{inb.serverIp}:{inb.port}</span>
+                            </div>
                           </div>
 
-                          {isSelected && (
-                            <div className="text-[10px] text-indigo-700 font-semibold flex items-center gap-1 pt-1 border-t border-indigo-200/60">
-                              <Check className="h-3 w-3 stroke-[3px]" />
-                              <span>{lang === "fa" ? "نود فعال برای پل وی‌توری" : "Active Upstream Bridge Node"}</span>
-                            </div>
-                          )}
+                          <div className="text-[10px] text-gray-500 flex items-center justify-between pt-1 border-t border-gray-200/60">
+                            <span className="text-[9px] font-mono text-indigo-600">
+                              🔗 tun_inb_{inbIdx} ➔ 127.0.0.1:{socksDedicatedPort} ➔ {inb.tag}
+                            </span>
+                            {isSelected && (
+                              <span className="text-[10px] text-indigo-700 font-bold flex items-center gap-1">
+                                <Check className="h-3 w-3 stroke-[3px]" />
+                                <span>{lang === "fa" ? "نود پیش‌فرض در پیش‌نمایش" : "Active Preview"}</span>
+                              </span>
+                            )}
+                          </div>
                         </div>
                       );
                     })}

@@ -32,6 +32,11 @@ export interface InboundNode {
   notes?: string;
   sourceType?: 'tag' | 'sni' | 'reality' | 'external_proxy' | 'node_cluster' | 'listen' | 'panel_url' | 'custom';
   extractedFrom?: string;
+  // Per-inbound dedicated Bridge routing settings
+  bridgeWgPort?: number;
+  bridgeOpenvpnPort?: number;
+  bridgeSubnetIndex?: number;
+  bridgeSocksPort?: number;
 }
 
 export interface SmartSubscription {

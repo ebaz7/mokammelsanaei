@@ -2061,8 +2061,9 @@ app.delete("/api/inbounds/:id", (req, res) => {
 // ==============================================================================
 
 // Helper to generate full Xray Core Outbound JSON from any 3x-ui link or inbound
-function generateXrayOutboundFromLink(link: string, fallbackHost = "127.0.0.1"): any {
+function generateXrayOutboundFromLink(link: string, fallbackHost = "127.0.0.1", tagParam = "proxy"): any {
   const parsed = parseV2rayLink(link, "11111111-2222-3333-4444-555555555555");
+  const outTag = tagParam || "proxy";
   if (!parsed) {
     return {
       protocol: "vless",
@@ -2079,11 +2080,10 @@ function generateXrayOutboundFromLink(link: string, fallbackHost = "127.0.0.1"):
         tlsSettings: { serverName: fallbackHost },
         wsSettings: { path: "/vless-ws" }
       },
-      tag: "proxy"
+      tag: outTag
     };
   }
 
-  const outTag = "proxy";
   const address = parsed.server || fallbackHost;
   const port = parsed.port || 443;
   const uuid = parsed.uuid || "11111111-2222-3333-4444-555555555555";
@@ -2156,74 +2156,139 @@ function generateXrayOutboundFromLink(link: string, fallbackHost = "127.0.0.1"):
   };
 }
 
-// 1. Get Live Bridge Status
+// Helper function to calculate per-inbound dedicated Bridge routing ports & subnets
+function getInboundBridgePorts(inbound: any, index: number) {
+  const wgPort = inbound?.bridgeWgPort || inbound?.wgPort || (51820 + index);
+  const openvpnPort = inbound?.bridgeOpenvpnPort || inbound?.openvpnPort || (1194 + index);
+  const socksPort = inbound?.bridgeSocksPort || (10808 + index);
+  const subnetIndex = typeof inbound?.bridgeSubnetIndex === "number" ? inbound.bridgeSubnetIndex : index;
+  const wgSubnet = `10.8.${subnetIndex}.0/24`;
+  const wgServerIp = `10.8.${subnetIndex}.1`;
+  const wgClientIp = `10.8.${subnetIndex}.2/24`;
+  const ovpnSubnet = `10.10.${subnetIndex}.0/24`;
+  const ovpnServerIp = `10.10.${subnetIndex}.1`;
+  const tunDevice = `tun_inb_${subnetIndex}`;
+  const wgInterface = `wg${subnetIndex}`;
+  const fwMark = 100 + subnetIndex;
+
+  return {
+    index,
+    wgPort,
+    openvpnPort,
+    socksPort,
+    subnetIndex,
+    wgSubnet,
+    wgServerIp,
+    wgClientIp,
+    ovpnSubnet,
+    ovpnServerIp,
+    tunDevice,
+    wgInterface,
+    fwMark,
+  };
+}
+
+// 1. Get Live Bridge Status with Per-Inbound Route Matrix
 app.get("/api/bridge/status", (req, res) => {
   const activeInbound = dbData.inbounds[0] || null;
   const subscriptionsCount = dbData.subscriptions.length;
+  
+  const inboundRoutes = dbData.inbounds.map((inb, idx) => {
+    const bridgeInfo = getInboundBridgePorts(inb, idx);
+    return {
+      inboundId: inb.id,
+      tag: inb.tag,
+      protocol: inb.protocol,
+      destinationServerIp: inb.serverIp,
+      destinationPort: inb.port,
+      bridgeWgPort: bridgeInfo.wgPort,
+      bridgeWgSubnet: bridgeInfo.wgSubnet,
+      bridgeWgInterface: bridgeInfo.wgInterface,
+      bridgeOpenvpnPort: bridgeInfo.openvpnPort,
+      bridgeOpenvpnSubnet: bridgeInfo.ovpnSubnet,
+      bridgeSocksPort: bridgeInfo.socksPort,
+      tunDevice: bridgeInfo.tunDevice,
+      fwMark: bridgeInfo.fwMark,
+      status: "active",
+      routingSummary: `Port ${bridgeInfo.wgPort} (WG) & Port ${bridgeInfo.openvpnPort} (OVPN) -> Direct Xray Outbound -> ${inb.tag} (${inb.serverIp}:${inb.port})`
+    };
+  });
+
   res.json({
     enabled: true,
-    mode: "xray_tun2socks_bridge",
-    upstreamNode: activeInbound ? activeInbound.tag : "Direct V2Ray Bridge",
+    mode: "per_inbound_dedicated_bridge",
+    upstreamNode: activeInbound ? activeInbound.tag : "Direct Multi-Inbound Bridge",
     upstreamServerIp: activeInbound ? activeInbound.serverIp : "127.0.0.1",
     upstreamProtocol: activeInbound ? activeInbound.protocol : "vless",
+    totalInbounds: dbData.inbounds.length,
+    inboundRoutes,
     activePeers: subscriptionsCount,
-    bridgeSubnets: {
-      wireguard: "10.8.0.0/24 (wg0)",
-      l2tp: "10.9.0.0/24 (ppp+)",
-      openvpn: "10.10.0.0/24 (tun0)"
-    },
     status: "ready",
-    farsiDescription: "تمام ترافیک کاربران WireGuard, OpenVPN و L2TP از طریق تونل ضد فیلتر Xray/V2Ray به سرور خارج هدایت می‌شود."
+    farsiDescription: "هر اینباند دارای پورت و تونل ورودی اختصاصی روی پل است. اتصال به هر اینباند مستقیماً و منحصراً ترافیک را از همان نود سنایی عبور می‌دهد بدون نیاز به تنظیم مجدد."
   });
 });
 
-// 2. Generate Client Xray & Tun2socks Configuration
+// 2. Generate Client Multi-Inbound Xray & Tun2socks Configuration
 app.get("/api/bridge/config", (req, res) => {
-  const link = (req.query.link as string) || "";
-  const inboundId = (req.query.inboundId as string) || "";
-  const inbound = inboundId ? dbData.inbounds.find(i => i.id === inboundId) : dbData.inbounds[0];
-  const serverIp = inbound?.serverIp || "127.0.0.1";
+  const inboundsList = dbData.inbounds.length > 0 ? dbData.inbounds : [
+    { id: "in-default", tag: "Default Sanaei Inbound", serverIp: "127.0.0.1", port: 443, protocol: "vless" }
+  ];
 
-  const defaultLink = link || generateMockLinks("bridge-master", "11111111-2222-3333-4444-555555555555")[0];
-  const xrayOutbound = generateXrayOutboundFromLink(defaultLink, serverIp);
+  const xrayInbounds: any[] = [];
+  const xrayOutbounds: any[] = [];
+  const routingRules: any[] = [
+    { type: "field", ip: ["geoip:private", "geoip:ir"], outTag: "direct" }
+  ];
+
+  inboundsList.forEach((inb, idx) => {
+    const ports = getInboundBridgePorts(inb, idx);
+    const inTagSocks = `socks-in-${idx}`;
+    const inTagTproxy = `tproxy-in-${idx}`;
+    const outTag = `out-inb-${idx}-${inb.tag.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+
+    // Add local SOCKS5 inbound for this specific node
+    xrayInbounds.push({
+      tag: inTagSocks,
+      port: ports.socksPort,
+      listen: "127.0.0.1",
+      protocol: "socks",
+      settings: { auth: "noauth", udp: true }
+    });
+
+    // Add local TProxy inbound for this specific node
+    xrayInbounds.push({
+      tag: inTagTproxy,
+      port: 12345 + idx,
+      listen: "127.0.0.1",
+      protocol: "dokodemo-door",
+      settings: { network: "tcp,udp", followRedirect: true },
+      streamSettings: { sockopt: { tproxy: "tproxy" } }
+    });
+
+    // Add dedicated Xray Outbound strictly connecting to this Sanaei Inbound
+    const mockLink = generateMockLinks(`bridge-node-${idx}`, "11111111-2222-3333-4444-555555555555")[0];
+    const nodeOutbound = generateXrayOutboundFromLink(mockLink, inb.serverIp || "127.0.0.1", outTag);
+    nodeOutbound.settings.vnext[0].port = inb.port || 443;
+    xrayOutbounds.push(nodeOutbound);
+
+    // Explicitly route traffic from this inbound's socks/tproxy port to its specific outbound
+    routingRules.push({
+      type: "field",
+      inboundTag: [inTagSocks, inTagTproxy],
+      outTag: outTag
+    });
+  });
+
+  xrayOutbounds.push({ tag: "direct", protocol: "freedom", settings: {} });
+  xrayOutbounds.push({ tag: "block", protocol: "blackhole", settings: {} });
 
   const fullXrayClientConfig = {
     log: { loglevel: "warning" },
-    inbounds: [
-      {
-        tag: "socks-in",
-        port: 10808,
-        listen: "127.0.0.1",
-        protocol: "socks",
-        settings: { auth: "noauth", udp: true }
-      },
-      {
-        tag: "http-in",
-        port: 10809,
-        listen: "127.0.0.1",
-        protocol: "http",
-        settings: { allowTransparent: false }
-      },
-      {
-        tag: "tproxy-in",
-        port: 12345,
-        listen: "127.0.0.1",
-        protocol: "dokodemo-door",
-        settings: { network: "tcp,udp", followRedirect: true },
-        streamSettings: { sockopt: { tproxy: "tproxy" } }
-      }
-    ],
-    outbounds: [
-      xrayOutbound,
-      { tag: "direct", protocol: "freedom", settings: {} },
-      { tag: "block", protocol: "blackhole", settings: {} }
-    ],
+    inbounds: xrayInbounds,
+    outbounds: xrayOutbounds,
     routing: {
       domainStrategy: "IPIfNonMatch",
-      rules: [
-        { type: "field", ip: ["geoip:private", "geoip:ir"], outTag: "direct" },
-        { type: "field", network: "tcp,udp", outTag: "proxy" }
-      ]
+      rules: routingRules
     }
   };
 
@@ -2231,14 +2296,68 @@ app.get("/api/bridge/config", (req, res) => {
   res.send(JSON.stringify(fullXrayClientConfig, null, 2));
 });
 
-// 3. Generate Complete Linux Bash Bridge Installer Script
+// 3. Generate Complete Multi-Inbound Linux Bash Bridge Installer Script
 app.get("/install-bridge.sh", (req, res) => {
   const host = req.headers.host || "127.0.0.1";
+  const inboundsList = dbData.inbounds.length > 0 ? dbData.inbounds : [
+    { id: "in-default", tag: "Default Inbound", serverIp: "127.0.0.1", port: 443, protocol: "vless" }
+  ];
+
+  let multiInboundSetupBash = "";
+
+  inboundsList.forEach((inb, idx) => {
+    const ports = getInboundBridgePorts(inb, idx);
+    multiInboundSetupBash += `
+# ==============================================================================
+# Inbound Node [${idx + 1}/${inboundsList.length}]: ${inb.tag} (${inb.serverIp}:${inb.port})
+# WireGuard Port: ${ports.wgPort} | OpenVPN Port: ${ports.openvpnPort} | SOCKS5: ${ports.socksPort}
+# ==============================================================================
+echo -e "\${CYAN}Configuring Dedicated Tunnel for Inbound: ${inb.tag} (WG Port ${ports.wgPort}, SOCKS ${ports.socksPort})...\${NC}"
+
+# 1. Create Tun2socks instance for this inbound
+cat <<EOF >/etc/systemd/system/tun2socks-inb-${idx}.service
+[Unit]
+Description=Tun2socks Bridge for Inbound ${inb.tag}
+After=network.target xray.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/tun2socks -device ${ports.tunDevice} -proxy socks5://127.0.0.1:${ports.socksPort} -interface lo
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# 2. Setup TUN interface and IP routing table ${ports.fwMark}
+ip tuntap add mode tun dev ${ports.tunDevice} 2>/dev/null || true
+ip addr add 198.18.${idx + 1}.1/24 dev ${ports.tunDevice} 2>/dev/null || true
+ip link set dev ${ports.tunDevice} up 2>/dev/null || true
+
+ip rule del fwmark ${ports.fwMark} 2>/dev/null || true
+ip route del default dev ${ports.tunDevice} table ${ports.fwMark} 2>/dev/null || true
+ip route add default dev ${ports.tunDevice} table ${ports.fwMark} 2>/dev/null || true
+ip rule add fwmark ${ports.fwMark} table ${ports.fwMark} 2>/dev/null || true
+
+# 3. Mark packets from WireGuard subnet (${ports.wgSubnet}) & OpenVPN subnet (${ports.ovpnSubnet})
+iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -j MARK --set-mark ${ports.fwMark} 2>/dev/null || true
+iptables -t mangle -D PREROUTING -s ${ports.ovpnSubnet} -j MARK --set-mark ${ports.fwMark} 2>/dev/null || true
+iptables -t mangle -A PREROUTING -s ${ports.wgSubnet} -j MARK --set-mark ${ports.fwMark}
+iptables -t mangle -A PREROUTING -s ${ports.ovpnSubnet} -j MARK --set-mark ${ports.fwMark}
+
+# Enable & restart service
+systemctl enable tun2socks-inb-${idx} 2>/dev/null
+systemctl restart tun2socks-inb-${idx} 2>/dev/null
+`;
+  });
+
   const script = `#!/usr/bin/env bash
 # ==============================================================================
-# 🌉 Sanaei V2Ray Bridge Gateway (WireGuard & L2TP -> V2Ray Tunnel Router)
-# Routes WireGuard (10.8.0.0/24), L2TP (10.9.0.0/24), OpenVPN (10.10.0.0/24)
-# Through Xray / V2Ray / Sing-box Anti-Censorship Outbound Tunnel
+# 🌉 Sanaei Multi-Inbound Dedicated Bridge Gateway
+# Routes each WireGuard / OpenVPN Inbound port independently to its exact
+# corresponding Sanaei V2Ray Inbound!
 # ==============================================================================
 
 RED='\\033[0;31m'
@@ -2253,10 +2372,10 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo -e "\${CYAN}==================================================================\${NC}"
-echo -e "\${CYAN}    🌉 Setting up V2Ray / Xray Middle Bridge for VPN Clients      \${NC}"
+echo -e "\${CYAN}    🌉 Setting up Multi-Inbound Dedicated Bridge Gateway         \${NC}"
 echo -e "\${CYAN}==================================================================\${NC}"
 
-# 1. Install prerequisites (tun2socks, xray, wireguard, strongswan, xl2tpd)
+# 1. Install prerequisites (tun2socks, xray, wireguard, strongswan, xl2tpd, openvpn)
 echo -e "\${YELLOW}[1/4] Installing Xray-core, Tun2socks and VPN daemons...\${NC}"
 apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \\
   curl wget jq iptables iproute2 wireguard strongswan xl2tpd ppp openvpn net-tools
@@ -2280,58 +2399,26 @@ if ! command -v tun2socks >/dev/null 2>&1; then
   rm -rf /tmp/tun2socks*
 fi
 
-# 2. Configure Bridge Systemd Service
-echo -e "\${YELLOW}[2/4] Configuring Tun2socks Systemd service (VPN -> SOCKS5 127.0.0.1:10808)...\${NC}"
-
-cat <<EOF >/etc/systemd/system/vpn-v2ray-bridge.service
-[Unit]
-Description=VPN to V2Ray Bridge (Tun2socks Routing)
-After=network.target xray.service
-
-[Service]
-Type=simple
-User=root
-ExecStart=/usr/local/bin/tun2socks -device tun2 -proxy socks5://127.0.0.1:10808 -interface lo
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# 3. Kernel & IPTables Routing Rules
-echo -e "\${YELLOW}[3/4] Setting up Kernel IP Routing for WireGuard, L2TP, and OpenVPN...\${NC}"
+# Enable IP forwarding
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-# Create tun2 interface if needed and route VPN subnets through it
-ip tuntap add mode tun dev tun2 2>/dev/null || true
-ip addr add 198.18.0.1/15 dev tun2 2>/dev/null || true
-ip link set dev tun2 up 2>/dev/null || true
+# 2. Fetch Multi-Inbound Dynamic Xray Config
+echo -e "\${YELLOW}[2/4] Pulling Multi-Inbound Xray Routing Configuration...\${NC}"
+mkdir -p /usr/local/etc/xray
+curl -s "http://${host}/api/bridge/config" > /usr/local/etc/xray/config.json
+systemctl restart xray 2>/dev/null
 
-# Routing Table for Tun2socks
-ip rule del fwmark 0x1 2>/dev/null || true
-ip route del default dev tun2 table 100 2>/dev/null || true
-ip route add default dev tun2 table 100 2>/dev/null || true
-ip rule add fwmark 0x1 table 100 2>/dev/null || true
-
-# Mark VPN packets (WireGuard 10.8.0.0/24, L2TP 10.9.0.0/24, OpenVPN 10.10.0.0/24) to go through V2Ray
-iptables -t mangle -D PREROUTING -s 10.8.0.0/24 -j MARK --set-mark 0x1 2>/dev/null || true
-iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -j MARK --set-mark 0x1 2>/dev/null || true
-iptables -t mangle -D PREROUTING -s 10.10.0.0/24 -j MARK --set-mark 0x1 2>/dev/null || true
-
-iptables -t mangle -A PREROUTING -s 10.8.0.0/24 -j MARK --set-mark 0x1
-iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -j MARK --set-mark 0x1
-iptables -t mangle -A PREROUTING -s 10.10.0.0/24 -j MARK --set-mark 0x1
-
-# Start services
+# 3. Setup Per-Inbound Dedicated Policy Routing & Services
+echo -e "\${YELLOW}[3/4] Creating Dedicated Ports and Policy Tunnels for ${inboundsList.length} Inbounds...\${NC}"
 systemctl daemon-reload
-systemctl enable vpn-v2ray-bridge 2>/dev/null
-systemctl restart vpn-v2ray-bridge 2>/dev/null
+
+${multiInboundSetupBash}
 
 echo -e "\${GREEN}==================================================================\${NC}"
-echo -e "\${GREEN}  ✅ V2Ray Middle Bridge successfully configured and active!     \${NC}"
-echo -e "\${GREEN}  All WireGuard (10.8.0.0/24), L2TP (10.9.0.0/24) and OpenVPN    \${NC}"
-echo -e "\${GREEN}  connections are now forwarded through the V2Ray upstream tunnel! \${NC}"
+echo -e "\${GREEN}  ✅ Multi-Inbound Dedicated Bridge Gateway is Active!          \${NC}"
+echo -e "\${GREEN}  Each Inbound has its own independent WireGuard / OpenVPN port. \${NC}"
+echo -e "\${GREEN}  Connecting to any profile routes strictly and solely through   \${NC}"
+echo -e "\${GREEN}  that specific Sanaei Inbound node!                             \${NC}"
 echo -e "\${GREEN}==================================================================\${NC}"
 `;
 
@@ -2773,19 +2860,25 @@ app.get("/api/sub/:token/wireguard-conf", (req, res) => {
   }
 
   const inboundId = req.query.inboundId as string;
-  const inbound = inboundId ? dbData.inbounds.find((i) => i.id === inboundId) : dbData.inbounds[0];
+  const inboundIdx = inboundId ? dbData.inbounds.findIndex((i) => i.id === inboundId) : 0;
+  const safeIdx = inboundIdx >= 0 ? inboundIdx : 0;
+  const inbound = dbData.inbounds[safeIdx] || dbData.inbounds[0];
+  const bridgePorts = getInboundBridgePorts(inbound, safeIdx);
+
   const directServerIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
   const { host: serverIp, isBridge } = resolveConnectionHost(req, directServerIp);
-  const serverPort = inbound?.wgPort || inbound?.port || dbData.settings?.wgServerPort || 51820;
+  const serverPort = isBridge ? bridgePorts.wgPort : (inbound?.wgPort || inbound?.port || dbData.settings?.wgServerPort || 51820);
   const serverPub = inbound?.wgServerPublicKey || dbData.settings?.wgServerPublicKey || sub.wireguardPublicKey;
+  const clientAddr = isBridge ? bridgePorts.wgClientIp : (sub.wireguardAddress || "10.8.0.2/24");
 
   const wgConf = `# ----------------------------------------------------
 # Sanaei Smart Sub - WireGuard Profile
-# Routing Mode: ${isBridge ? `🌉 Bridge Gateway (Encapsulated -> ${inbound?.tag || '3x-ui node'})` : '⚡ Direct Node'}
+# Routing Mode: ${isBridge ? `🌉 Bridge Gateway (Port ${serverPort} -> Dedicated Tunnel -> ${inbound?.tag || '3x-ui node'})` : '⚡ Direct Node'}
+# Inbound Destination: ${inbound?.tag || 'Default'} (${inbound?.serverIp || directServerIp}:${inbound?.port || 443})
 # ----------------------------------------------------
 [Interface]
 PrivateKey = ${sub.wireguardPrivateKey}
-Address = ${sub.wireguardAddress || "10.8.0.2/24"}
+Address = ${clientAddr}
 DNS = ${sub.wireguardDns || "1.1.1.1, 8.8.8.8"}
 
 [Peer]
@@ -2810,15 +2903,20 @@ app.get("/api/sub/:token/openvpn-ovpn", (req, res) => {
   }
 
   const inboundId = req.query.inboundId as string;
-  const inbound = inboundId ? dbData.inbounds.find((i) => i.id === inboundId) : dbData.inbounds[0];
+  const inboundIdx = inboundId ? dbData.inbounds.findIndex((i) => i.id === inboundId) : 0;
+  const safeIdx = inboundIdx >= 0 ? inboundIdx : 0;
+  const inbound = dbData.inbounds[safeIdx] || dbData.inbounds[0];
+  const bridgePorts = getInboundBridgePorts(inbound, safeIdx);
+
   const directServerIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
   const { host: serverIp, isBridge } = resolveConnectionHost(req, directServerIp);
-  const port = inbound?.openvpnPort || sub.openvpnPort || 1194;
+  const port = isBridge ? bridgePorts.openvpnPort : (inbound?.openvpnPort || sub.openvpnPort || 1194);
   const proto = inbound?.openvpnProto || sub.openvpnProto || "udp";
 
   const ovpnConfig = `# ----------------------------------------------------
 # Sanaei Smart Sub - OpenVPN Profile
-# Routing Mode: ${isBridge ? `🌉 Bridge Gateway (Encapsulated -> ${inbound?.tag || '3x-ui node'})` : '⚡ Direct Node'}
+# Routing Mode: ${isBridge ? `🌉 Bridge Gateway (Port ${port} -> Dedicated Tunnel -> ${inbound?.tag || '3x-ui node'})` : '⚡ Direct Node'}
+# Inbound Destination: ${inbound?.tag || 'Default'} (${inbound?.serverIp || directServerIp}:${inbound?.port || 443})
 # ----------------------------------------------------
 client
 dev tun
