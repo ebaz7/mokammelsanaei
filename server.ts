@@ -16,6 +16,12 @@ const PORT = parseInt(process.env.PORT || "3000", 10);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Global middleware to set companion detection header
+app.use((req, res, next) => {
+  res.setHeader("X-Sanaei-Companion", "true");
+  next();
+});
+
 // Lightweight File-based Database
 const DB_DIR = path.join(process.cwd(), "data");
 const DB_FILE = path.join(DB_DIR, "db.json");
@@ -158,6 +164,64 @@ interface LoginTestResult {
   contentType: "form" | "json";
 }
 
+interface DiagnosticItem {
+  url: string;
+  method: "form" | "json";
+  success: boolean;
+  error: string;
+  status?: number;
+  isCompanionSelf?: boolean;
+  is3xUiDetected?: boolean;
+}
+
+class DiagnosticError extends Error {
+  diagnostics: DiagnosticItem[];
+  constructor(message: string, diagnostics: DiagnosticItem[]) {
+    super(message);
+    this.name = "DiagnosticError";
+    this.diagnostics = diagnostics;
+  }
+}
+
+function buildFarsiSummary(diagnostics: DiagnosticItem[]): string {
+  const isCompanionSelfList = diagnostics.filter(d => d.isCompanionSelf);
+  const is3xUiList = diagnostics.filter(d => d.is3xUiDetected);
+  const timeouts = diagnostics.filter(d => d.error.includes("Timeout") || d.error.includes("زمان") || d.error.includes("پایان"));
+  const refused = diagnostics.filter(d => d.error.includes("Refused") || d.error.includes("رد شد") || d.error.includes("refused"));
+
+  let summary = "ارتباط با هیچ‌یک از آدرس‌ها برقرار نشد.\n\n🔍 نتایج عیب‌یابی هوشمند:\n";
+
+  if (isCompanionSelfList.length > 0) {
+    summary += "⚠️ توجه: برخی از آدرس‌های تست شده به خود این افزونه متصل می‌شوند (پورت اشتباه است). لطفاً پورت پنل اصلی ۳x-ui را وارد کنید، نه پورت این پنل کمکی.\n";
+  }
+  if (is3xUiList.length > 0) {
+    summary += "🎯 پنل سنایی ۳x-ui در این آدرس فعال است، اما یا یوزرنیم/پسورد اشتباه است، یا پیشوند مسیر (Base Path) با تنظیمات پنل مطابقت ندارد.\n";
+  }
+  if (refused.length > 0 && is3xUiList.length === 0) {
+    summary += "🚫 فایروال سرور یا پورت بسته: اتصال به پورت‌های تست شده رد شد. لطفاً مطمئن شوید پورت پنل روی سرور باز است (مثلاً ufw allow <port>) و فایروال آن را مسدود نکرده است.\n";
+  }
+  if (timeouts.length > 0 && is3xUiList.length === 0 && refused.length === 0) {
+    summary += "⏳ زمان اتصال پایان یافت. سرور در پورت‌های تست شده پاسخ نمی‌دهد. مطمئن شوید آی‌پی یا دامنه درست است و سرور روشن است.\n";
+  }
+
+  // Add list of tried candidates for visual clarity
+  summary += "\n📋 آدرس‌های تست شده:\n";
+  const uniqueUrls = Array.from(new Set(diagnostics.map(d => d.url)));
+  uniqueUrls.slice(0, 5).forEach(url => {
+    const matching = diagnostics.filter(d => d.url === url);
+    const hasDetected = matching.some(m => m.is3xUiDetected);
+    const hasSelf = matching.some(m => m.isCompanionSelf);
+    
+    let statusLabel = "❌ ناموفق";
+    if (hasDetected) statusLabel = "🎯 شناسایی پنل ۳x-ui";
+    else if (hasSelf) statusLabel = "⚠️ خود پنل کمکی";
+    
+    summary += `- ${url} (${statusLabel})\n`;
+  });
+
+  return summary;
+}
+
 async function tryLoginOnCandidates(url: string, webBasePath: string, username: string, password: string): Promise<LoginTestResult> {
   let cleanUrl = url.replace(/\/$/, "");
   // Strip trailing "/login" or "/panel" if written in the URL
@@ -238,94 +302,123 @@ async function tryLoginOnCandidates(url: string, webBasePath: string, username: 
     addCandidate(port8090Url2, "");
   }
 
-  // 6. What if they wrote port 8080/8090 and we try root domain on port 80 or 443
+  // 6. Test on standard default port 2053
+  const port2053Url1 = `${protocol}//${hostname}:2053`;
+  addCandidate(port2053Url1, cleanBasePath);
+  addCandidate(port2053Url1, "");
+  const port2053Url2 = `${otherProtocol}//${hostname}:2053`;
+  addCandidate(port2053Url2, cleanBasePath);
+  addCandidate(port2053Url2, "");
+
+  // 7. What if they wrote port 8080/8090 and we try root domain on port 80 or 443
   const rootUrl1 = `${protocol}//${hostname}`;
   addCandidate(rootUrl1, cleanBasePath);
   addCandidate(rootUrl1, "");
+  const rootUrl2 = `${otherProtocol}//${hostname}`;
+  addCandidate(rootUrl2, cleanBasePath);
+  addCandidate(rootUrl2, "");
 
-  console.log(`[3x-ui Auth] Trying ${candidateUrls.length} different URL/Port variations in parallel...`);
+  console.log(`[3x-ui Auth] Testing ${candidateUrls.length} different URL/Port variations in parallel with deep diagnostics...`);
 
-  // Run the candidates in parallel to see which succeeds first
+  const diagnostics: DiagnosticItem[] = [];
+  let successfulResult: LoginTestResult | null = null;
+
+  // Run the candidates in parallel to gather detailed diagnostics
   const tests = candidateUrls.flatMap((c) => {
-    return [
-      // Test form URL encoding
-      (async (): Promise<LoginTestResult> => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000);
-        try {
-          const res = await fetch(c.login, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/x-www-form-urlencoded",
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-              "Accept": "application/json, text/plain, */*",
-            },
-            body: new URLSearchParams({ username, password }),
-            signal: controller.signal,
-          });
-          clearTimeout(timeoutId);
-          if (res.ok) {
-            const setCookie = res.headers.get("set-cookie");
-            if (setCookie) {
-              return {
-                loginUrl: c.login,
-                inboundsUrl: c.inbounds,
-                cookie: setCookie.split(";")[0],
-                contentType: "form" as const,
-              };
-            }
-          }
-          throw new Error(`Failed with status ${res.status}`);
-        } catch (e: any) {
-          clearTimeout(timeoutId);
-          throw e;
+    return ["form", "json"].map(async (method) => {
+      const diag: DiagnosticItem = {
+        url: c.login,
+        method: method as "form" | "json",
+        success: false,
+        error: "",
+      };
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      try {
+        const fetchOptions: any = {
+          method: "POST",
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+          },
+          signal: controller.signal,
+        };
+
+        if (method === "form") {
+          fetchOptions.headers["Content-Type"] = "application/x-www-form-urlencoded";
+          fetchOptions.body = new URLSearchParams({ username, password }).toString();
+        } else {
+          fetchOptions.headers["Content-Type"] = "application/json";
+          fetchOptions.body = JSON.stringify({ username, password });
         }
-      })(),
-      // Test JSON body encoding
-      (async (): Promise<LoginTestResult> => {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 6000);
-        try {
-          const res = await fetch(c.login, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-              "Accept": "application/json, text/plain, */*",
-            },
-            body: JSON.stringify({ username, password }),
-            signal: controller.signal,
-          });
-          clearTimeout(timeoutId);
-          if (res.ok) {
-            const setCookie = res.headers.get("set-cookie");
-            if (setCookie) {
-              return {
-                loginUrl: c.login,
-                inboundsUrl: c.inbounds,
-                cookie: setCookie.split(";")[0],
-                contentType: "json" as const,
-              };
-            }
-          }
-          throw new Error(`Failed with status ${res.status}`);
-        } catch (e: any) {
-          clearTimeout(timeoutId);
-          throw e;
+
+        const res = await fetch(c.login, fetchOptions);
+        clearTimeout(timeoutId);
+        diag.status = res.status;
+
+        // Check if it's the companion panel itself (loops back to ourselves)
+        if (res.headers.get("X-Sanaei-Companion") === "true") {
+          diag.isCompanionSelf = true;
+          diag.error = "به خود این پنل متصل شد (حلقه نامعتبر)";
         }
-      })(),
-    ];
+
+        const text = await res.text();
+        const trimmedText = text.trim();
+        
+        // 404 is classic Go/Gin route missing indicator
+        if (trimmedText === "404 page not found") {
+          diag.is3xUiDetected = true;
+          diag.error = "مسیر اشتباه است (۴۰۴)";
+        }
+
+        let json: any = null;
+        try {
+          json = JSON.parse(text);
+        } catch (e) {}
+
+        if (json && typeof json === "object") {
+          diag.is3xUiDetected = true;
+          if (json.success === true) {
+            diag.success = true;
+            const setCookie = res.headers.get("set-cookie");
+            successfulResult = {
+              loginUrl: c.login,
+              inboundsUrl: c.inbounds,
+              cookie: setCookie ? setCookie.split(";")[0] : "",
+              contentType: method as "form" | "json",
+            };
+          } else {
+            diag.error = json.msg || "یوزرنیم یا پسورد اشتباه است";
+          }
+        } else {
+          if (!diag.error) {
+            diag.error = `پاسخ نامشخص (Status ${res.status})`;
+          }
+        }
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        if (err.name === "AbortError") {
+          diag.error = "زمان اتصال پایان یافت (Timeout)";
+        } else if (err.code === "ECONNREFUSED" || err.message?.includes("refused")) {
+          diag.error = "اتصال رد شد (Connection Refused)";
+        } else {
+          diag.error = err.message || "خطای ناشناخته شبکه";
+        }
+      }
+      diagnostics.push(diag);
+    });
   });
 
-  try {
-    const successResult = await Promise.any(tests);
-    return successResult;
-  } catch (aggregateError: any) {
-    console.error("[3x-ui Auth] All connection candidates failed.");
-    throw new Error(
-      "ارتباط با هیچ‌یک از آدرس‌ها برقرار نشد. لطفاً پروتکل، آی‌پی، پورت سرور و یوزرنیم/پسورد پنل سنایی خود را بررسی کنید. همچنین مطمئن شوید فایروال سرور پورت را مسدود نکرده است."
-    );
+  await Promise.allSettled(tests);
+
+  if (successfulResult) {
+    return successfulResult;
   }
+
+  // If we got here, all candidates failed. Build a detailed smart diagnostic error message.
+  const farsiSummary = buildFarsiSummary(diagnostics);
+  throw new DiagnosticError(farsiSummary, diagnostics);
 }
 
 async function fetchLiveNodesFromPanel(panel: Panel, username: string, uuid: string): Promise<string[]> {
@@ -751,7 +844,8 @@ app.post("/api/panels/test", async (req, res) => {
     console.error("Test connection failed:", err);
     res.json({
       success: false,
-      message: `اتصال به سرور برقرار نشد.\nعلت: ${err.message || "Connection timed out"}\nراهنما: مطمئن شوید آی‌پی/دامنه سرور درست است، پورت پنل باز است و فایروال سرور پورت را نبسته باشد. همچنین یوزرنیم و پسورد پنل را بررسی کنید.`,
+      message: err.message,
+      diagnostics: err.diagnostics || [],
     });
   }
 });

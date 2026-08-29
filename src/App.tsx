@@ -46,7 +46,20 @@ export default function App() {
   const [newPanelPass, setNewPanelPass] = useState("");
   const [newPanelWebBasePath, setNewPanelWebBasePath] = useState("");
   const [isTestingPanel, setIsTestingPanel] = useState(false);
-  const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [testResult, setTestResult] = useState<{
+    success: boolean;
+    message: string;
+    diagnostics?: Array<{
+      url: string;
+      method: "form" | "json";
+      success: boolean;
+      error: string;
+      status?: number;
+      isCompanionSelf?: boolean;
+      is3xUiDetected?: boolean;
+    }>;
+  } | null>(null);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   // Subscriptions state
   const [subs, setSubs] = useState<SmartSubscription[]>([]);
@@ -203,6 +216,7 @@ export default function App() {
       setTestResult({
         success: data.success,
         message: data.message,
+        diagnostics: data.diagnostics,
       });
     } catch (err) {
       setTestResult({
@@ -1198,16 +1212,64 @@ export default function App() {
 
                   {/* Connection Test Output */}
                   {testResult && (
-                    <div className={`p-3.5 rounded-xl border text-xs flex gap-2 ${
-                      testResult.success 
-                        ? "bg-green-50 border-green-100 text-green-800" 
-                        : "bg-red-50 border-red-100 text-red-800"
-                    }`}>
-                      <Info className="h-4 w-4 shrink-0 mt-0.5" />
-                      <div>
-                        <strong className="font-bold block">{testResult.success ? (lang === "fa" ? "اتصال موفق" : "Connected!") : (lang === "fa" ? "ناموفق" : "Connection Error")}</strong>
-                        <span className="text-[10px] mt-0.5 block opacity-90">{testResult.message}</span>
+                    <div className="space-y-2">
+                      <div className={`p-3.5 rounded-xl border text-xs flex gap-2 ${
+                        testResult.success 
+                          ? "bg-green-50 border-green-100 text-green-800" 
+                          : "bg-red-50 border-red-100 text-red-800"
+                      }`}>
+                        <Info className="h-4 w-4 shrink-0 mt-0.5" />
+                        <div className="flex-1 min-w-0">
+                          <strong className="font-bold block">{testResult.success ? (lang === "fa" ? "اتصال موفق" : "Connected!") : (lang === "fa" ? "ناموفق" : "Connection Error")}</strong>
+                          <span className="text-[10px] mt-0.5 block opacity-90 whitespace-pre-line">{testResult.message}</span>
+                          
+                          {!testResult.success && testResult.diagnostics && testResult.diagnostics.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setShowDiagnostics(!showDiagnostics)}
+                              className="mt-2.5 text-[10px] font-bold text-red-700 hover:text-red-900 underline flex items-center gap-1 cursor-pointer"
+                            >
+                              <span>{showDiagnostics ? (lang === "fa" ? "بستن جزئیات فنی" : "Hide technical details") : (lang === "fa" ? "مشاهده جزئیات فنی و آدرس‌های تست‌شده" : "Show technical details & tested URLs")}</span>
+                            </button>
+                          )}
+                        </div>
                       </div>
+
+                      {showDiagnostics && !testResult.success && testResult.diagnostics && (
+                        <div className="bg-gray-50 border border-gray-150 rounded-xl p-3 text-[10px] space-y-1.5 max-h-64 overflow-y-auto font-mono text-gray-700">
+                          <div className="font-bold text-gray-500 pb-1 border-b border-gray-200/60 flex justify-between items-center">
+                            <span>{lang === "fa" ? "آدرس و متد تست شده" : "Tested URLs & Methods"}</span>
+                            <span>{lang === "fa" ? "وضعیت اتصال" : "Status"}</span>
+                          </div>
+                          {testResult.diagnostics.map((d, idx) => (
+                            <div key={idx} className="flex justify-between gap-4 py-1 border-b border-gray-100 last:border-0">
+                              <div className="truncate flex-1">
+                                <span className={`mr-1 px-1 py-0.2 rounded text-[8px] font-sans font-bold ${d.method === "json" ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700"}`}>
+                                  {d.method.toUpperCase()}
+                                </span>
+                                <span className="opacity-80" title={d.url}>{d.url}</span>
+                              </div>
+                              <div className="shrink-0 flex items-center gap-1.5">
+                                {d.success ? (
+                                  <span className="text-green-600 font-bold font-sans">✓ OK</span>
+                                ) : (
+                                  <span className="text-red-500 font-sans" title={d.error}>
+                                    {d.isCompanionSelf ? (
+                                      <span className="text-amber-500 font-sans font-bold">LOOPBACK ⚠️</span>
+                                    ) : d.is3xUiDetected ? (
+                                      <span className="text-amber-600 font-sans font-bold">3X-UI 🎯 (404/ERR)</span>
+                                    ) : d.status ? (
+                                      `HTTP ${d.status}`
+                                    ) : (
+                                      d.error.includes("Timeout") || d.error.includes("زمان") ? "TIMEOUT ⏳" : "REFUSED 🚫"
+                                    )}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
 
