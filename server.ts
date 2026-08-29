@@ -428,74 +428,86 @@ function syncLocalVpnServices() {
       console.log(`[VPN Sync] L2TP /etc/ppp/chap-secrets successfully synchronized.`);
     }
 
-    // 2. Sync WireGuard Peers to /etc/wireguard/wg0.conf
+    // 2. Sync WireGuard Peers to per-inbound /etc/wireguard/wgX.conf
     const wgDir = "/etc/wireguard";
     if (fs.existsSync(wgDir)) {
-      const wgConfPath = "/etc/wireguard/wg0.conf";
-      let interfaceSection = "";
+      const inboundsList = dbData.inbounds.length > 0 ? dbData.inbounds : [
+        { id: "in-default", tag: "Default Sanaei Inbound", serverIp: "127.0.0.1", port: 443, protocol: "vless" }
+      ];
 
-      if (!fs.existsSync(wgConfPath)) {
-        console.log(`[VPN Sync] /etc/wireguard/wg0.conf not found. Initializing with default interface...`);
-        const serverPrivateKey = dbData.settings?.wgServerPrivateKey || crypto.randomBytes(32).toString("base64");
-        const port = dbData.settings?.wgServerPort || 51820;
-        interfaceSection = `[Interface]\nPrivateKey = ${serverPrivateKey}\nAddress = 10.8.0.1/24\nListenPort = ${port}\n\n`;
-      } else {
-        const existingConf = fs.readFileSync(wgConfPath, "utf-8");
-        const lines = existingConf.split("\n");
-        const interfaceLines: string[] = [];
-        
-        for (const line of lines) {
-          if (line.trim().startsWith("[Peer]")) {
-            break;
+      inboundsList.forEach((inb, inbIdx) => {
+        const ports = getInboundBridgePorts(inb, inbIdx);
+        const wgConfPath = `/etc/wireguard/${ports.wgInterface}.conf`;
+        let interfaceSection = "";
+
+        if (!fs.existsSync(wgConfPath)) {
+          console.log(`[VPN Sync] ${wgConfPath} not found. Initializing with dedicated inbound interface...`);
+          const serverPrivateKey = dbData.settings?.wgServerPrivateKey || crypto.randomBytes(32).toString("base64");
+          interfaceSection = `[Interface]\nPrivateKey = ${serverPrivateKey}\nAddress = ${ports.wgServerIp}/24\nListenPort = ${ports.wgPort}\n\n`;
+        } else {
+          const existingConf = fs.readFileSync(wgConfPath, "utf-8");
+          const lines = existingConf.split("\n");
+          const interfaceLines: string[] = [];
+          
+          for (const line of lines) {
+            if (line.trim().startsWith("[Peer]")) {
+              break;
+            }
+            interfaceLines.push(line);
           }
-          interfaceLines.push(line);
+          interfaceSection = interfaceLines.join("\n").trim() + "\n\n";
         }
-        interfaceSection = interfaceLines.join("\n").trim() + "\n\n";
-      }
 
-      let peerSection = ``;
-      dbData.subscriptions.forEach((sub, idx) => {
-        const clientIp = `10.8.0.${100 + idx}`;
-        sub.wireguardAddress = `${clientIp}/24`;
-        
-        peerSection += `# User: ${sub.username}\n`;
-        peerSection += `[Peer]\n`;
-        peerSection += `PublicKey = ${sub.wireguardPublicKey}\n`;
-        peerSection += `AllowedIPs = ${clientIp}/32\n\n`;
-      });
+        let peerSection = ``;
+        dbData.subscriptions.forEach((sub, subIdx) => {
+          const clientIp = `10.8.${ports.subnetIndex}.${100 + subIdx}`;
+          if (inbIdx === 0) {
+            sub.wireguardAddress = `${clientIp}/24`; // Primary address record
+          }
+          
+          peerSection += `# User: ${sub.username}\n`;
+          peerSection += `[Peer]\n`;
+          peerSection += `PublicKey = ${sub.wireguardPublicKey}\n`;
+          peerSection += `AllowedIPs = ${clientIp}/32\n\n`;
+        });
 
-      const fullConf = interfaceSection + peerSection;
-      fs.writeFileSync(wgConfPath, fullConf, { mode: 0o600 });
-      console.log(`[VPN Sync] /etc/wireguard/wg0.conf successfully synchronized with ${dbData.subscriptions.length} peers.`);
+        const fullConf = interfaceSection + peerSection;
+        fs.writeFileSync(wgConfPath, fullConf, { mode: 0o600 });
+        console.log(`[VPN Sync] ${wgConfPath} successfully synchronized with ${dbData.subscriptions.length} peers.`);
 
-      // 2.5 Sync OpenVPN CCD (Static IPs)
-      const ccdDir = "/etc/openvpn/server/ccd";
-      if (fs.existsSync(ccdDir)) {
-        dbData.subscriptions.forEach((sub, idx) => {
-          if (sub.openvpnUser) {
-            const ovpnIp = `10.10.0.${100 + idx}`;
-            fs.writeFileSync(`${ccdDir}/${sub.openvpnUser}`, `ifconfig-push ${ovpnIp} 255.255.255.0\n`);
+        // Apply the WireGuard configurations dynamically using hot-reload syncconf
+        exec(`wg syncconf ${ports.wgInterface} <(wg-quick strip ${ports.wgInterface})`, { shell: "/bin/bash" }, (err, stdout, stderr) => {
+          if (err) {
+            console.warn(`[VPN Sync] wg syncconf hot-reload failed for ${ports.wgInterface}, attempting systemctl restart:`, stderr || err.message);
+            exec(`systemctl restart wg-quick@${ports.wgInterface}`, (restartErr, restartStdout, restartStderr) => {
+              if (restartErr) {
+                console.error(`[VPN Sync] Restarting wg-quick@${ports.wgInterface} failed:`, restartStderr || restartErr.message);
+              } else {
+                console.log(`[VPN Sync] WireGuard server ${ports.wgInterface} restarted successfully.`);
+              }
+            });
+          } else {
+            console.log(`[VPN Sync] WireGuard server ${ports.wgInterface} hot-reloaded with current peers.`);
           }
         });
-        console.log(`[VPN Sync] OpenVPN CCD successfully synchronized.`);
-      }
-
-      // Apply the WireGuard configurations dynamically using hot-reload syncconf
-      exec("wg syncconf wg0 <(wg-quick strip wg0)", { shell: "/bin/bash" }, (err, stdout, stderr) => {
-        if (err) {
-          console.warn("[VPN Sync] wg syncconf hot-reload failed, attempting full systemctl restart of wg-quick@wg0:", stderr || err.message);
-          exec("systemctl restart wg-quick@wg0", (restartErr, restartStdout, restartStderr) => {
-            if (restartErr) {
-              console.error("[VPN Sync] Restarting wg-quick@wg0 failed:", restartStderr || restartErr.message);
-            } else {
-              console.log("[VPN Sync] WireGuard server restarted successfully.");
-            }
-          });
-        } else {
-          console.log("[VPN Sync] WireGuard server hot-reloaded with current peers.");
-        }
       });
     }
+
+    // 2.5 Sync OpenVPN CCD (Static IPs)
+    const ccdDir = "/etc/openvpn/server/ccd";
+    if (fs.existsSync(ccdDir)) {
+      // NOTE: For multi-inbound OVPN, we assign the primary IP (inb0) statically.
+      // OVPN handles other subnets dynamically or via multiple CCD dirs if needed.
+      // For simplicity, we just set the primary subnet. 
+      dbData.subscriptions.forEach((sub, idx) => {
+        if (sub.openvpnUser) {
+          const ovpnIp = `10.10.0.${100 + idx}`;
+          fs.writeFileSync(`${ccdDir}/${sub.openvpnUser}`, `ifconfig-push ${ovpnIp} 255.255.255.0\n`);
+        }
+      });
+      console.log(`[VPN Sync] OpenVPN CCD successfully synchronized.`);
+    }
+
   } catch (err: any) {
     console.error("[VPN Sync] Error in syncLocalVpnServices:", err.message);
   }
@@ -2445,57 +2457,61 @@ app.get("/api/bridge/config", (req, res) => {
     { id: "in-default", tag: "Default Sanaei Inbound", serverIp: "127.0.0.1", port: 443, protocol: "vless" }
   ];
 
-  const primaryInbound = inboundsList[0];
-
   const xrayInbounds: any[] = [];
   const xrayOutbounds: any[] = [];
   const routingRules: any[] = [
     { type: "field", ip: ["geoip:private", "geoip:ir"], outTag: "direct" }
   ];
 
-  // 1. Single TPROXY Inbound for all VPN traffic
-  const tproxyPort = 12345;
-  const inTagTproxy = `tproxy-in`;
-  xrayInbounds.push({
-    tag: inTagTproxy,
-    port: tproxyPort,
-    listen: "0.0.0.0",
-    protocol: "dokodemo-door",
-    settings: { network: "tcp,udp", followRedirect: true },
-    streamSettings: { sockopt: { tproxy: "tproxy" } }
-  });
+  inboundsList.forEach((inb, idx) => {
+    const ports = getInboundBridgePorts(inb, idx);
+    const inTagSocks = `socks-in-${idx}`;
+    const inTagTproxy = `tproxy-in-${idx}`;
 
-  // 2. Fallback Outbound (uses default/fallback UUID)
-  const fallbackTag = `out-fallback`;
-  const mockLink = generateMockLinks(`bridge-node-fallback`, "11111111-2222-3333-4444-555555555555")[0];
-  const fallbackOutbound = generateXrayOutboundFromLink(mockLink, primaryInbound.serverIp || "127.0.0.1", fallbackTag);
-  fallbackOutbound.settings.vnext[0].port = primaryInbound.port || 443;
-  xrayOutbounds.push(fallbackOutbound);
+    // Add local TProxy inbound for this specific node
+    xrayInbounds.push({
+      tag: inTagTproxy,
+      port: ports.tproxyPort,
+      listen: "0.0.0.0",
+      protocol: "dokodemo-door",
+      settings: { network: "tcp,udp", followRedirect: true },
+      streamSettings: { sockopt: { tproxy: "tproxy" } }
+    });
 
-  // 3. Dynamic Outbounds per Active Subscription Client
-  dbData.subscriptions.forEach((sub, subIdx) => {
-    const clientIp = `10.8.0.${100 + subIdx}`;
-    const ovpnClientIp = `10.10.0.${100 + subIdx}`;
-    const l2tpClientIp = `10.9.0.${100 + subIdx}`;
-    
-    const userOutboundTag = `out-sub-${subIdx}`;
-    const userOutbound = generateXrayOutboundForInboundAndUser(primaryInbound, sub.uuid, userOutboundTag);
-    xrayOutbounds.push(userOutbound);
+    // 1. Fallback Outbound (uses default/fallback UUID)
+    const fallbackTag = `out-inb-${idx}-fallback`;
+    const mockLink = generateMockLinks(`bridge-node-${idx}`, "11111111-2222-3333-4444-555555555555")[0];
+    const fallbackOutbound = generateXrayOutboundFromLink(mockLink, inb.serverIp || "127.0.0.1", fallbackTag);
+    fallbackOutbound.settings.vnext[0].port = inb.port || 443;
+    xrayOutbounds.push(fallbackOutbound);
 
-    // Route this specific client IP to their dedicated outbound with their real UUID
+    // 2. Dynamic Outbounds per Active Subscription Client
+    dbData.subscriptions.forEach((sub, subIdx) => {
+      const clientIp = `10.8.${ports.subnetIndex}.${100 + subIdx}`;
+      const ovpnClientIp = `10.10.${ports.subnetIndex}.${100 + subIdx}`;
+      const l2tpClientIp = `10.9.0.${100 + subIdx}`; // L2TP only routes to first node
+      
+      const sourceIPs = idx === 0 ? [clientIp, ovpnClientIp, l2tpClientIp] : [clientIp, ovpnClientIp];
+      
+      const userOutboundTag = `out-inb-${idx}-sub-${subIdx}`;
+      const userOutbound = generateXrayOutboundForInboundAndUser(inb, sub.uuid, userOutboundTag);
+      xrayOutbounds.push(userOutbound);
+
+      // Route this specific client IP to their dedicated outbound with their real UUID
+      routingRules.push({
+        type: "field",
+        inboundTag: [inTagTproxy],
+        sourceIP: sourceIPs,
+        outTag: userOutboundTag
+      });
+    });
+
+    // 3. Fallback Route for any other/anonymous clients using the fallback outbound
     routingRules.push({
       type: "field",
       inboundTag: [inTagTproxy],
-      sourceIP: [clientIp, ovpnClientIp, l2tpClientIp],
-      outTag: userOutboundTag
+      outTag: fallbackTag
     });
-  });
-
-  // 4. Fallback Route for any other/anonymous clients using the fallback outbound
-  routingRules.push({
-    type: "field",
-    inboundTag: [inTagTproxy],
-    outTag: fallbackTag
   });
 
   xrayOutbounds.push({ tag: "direct", protocol: "freedom", settings: {} });
@@ -2518,11 +2534,54 @@ app.get("/api/bridge/config", (req, res) => {
 // 3. Generate Complete Multi-Inbound Linux Bash Bridge Installer Script
 app.get("/install-bridge.sh", (req, res) => {
   const host = req.headers.host || "127.0.0.1";
-  
+  const inboundsList = dbData.inbounds.length > 0 ? dbData.inbounds : [
+    { id: "in-default", tag: "Default Inbound", serverIp: "127.0.0.1", port: 443, protocol: "vless" }
+  ];
+
+  let multiInboundSetupBash = "";
+
+  inboundsList.forEach((inb, idx) => {
+    const ports = getInboundBridgePorts(inb, idx);
+    multiInboundSetupBash += `
+# ==============================================================================
+# Inbound Node [${idx + 1}/${inboundsList.length}]: ${inb.tag} (${inb.serverIp}:${inb.port})
+# WireGuard Port: ${ports.wgPort} | OpenVPN Port: ${ports.openvpnPort} | TPROXY: ${ports.tproxyPort}
+# ==============================================================================
+echo -e "\\${CYAN}Configuring Dedicated Tunnel for Inbound: ${inb.tag} (WG Port ${ports.wgPort}, TPROXY ${ports.tproxyPort})...\\${NC}"
+
+# 1. Setup IP routing table ${ports.fwMark} for TPROXY
+ip rule del fwmark ${ports.fwMark} 2>/dev/null || true
+ip route del local default dev lo table ${ports.fwMark} 2>/dev/null || true
+ip route add local default dev lo table ${ports.fwMark} 2>/dev/null || true
+ip rule add fwmark ${ports.fwMark} table ${ports.fwMark} 2>/dev/null || true
+
+# 2. Mark packets from WireGuard subnet (${ports.wgSubnet}) & OpenVPN subnet (${ports.ovpnSubnet}) to TPROXY
+iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
+iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -p udp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
+iptables -t mangle -D PREROUTING -s ${ports.ovpnSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
+iptables -t mangle -D PREROUTING -s ${ports.ovpnSubnet} -p udp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
+
+iptables -t mangle -A PREROUTING -s ${ports.wgSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark}
+iptables -t mangle -A PREROUTING -s ${ports.wgSubnet} -p udp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark}
+iptables -t mangle -A PREROUTING -s ${ports.ovpnSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark}
+iptables -t mangle -A PREROUTING -s ${ports.ovpnSubnet} -p udp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark}
+`;
+  });
+
+  // L2TP is always bound to first inbound
+  multiInboundSetupBash += `
+# Setup L2TP TPROXY marking for Inbound 1
+iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
+iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
+iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100
+iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100
+`;
+
   const script = `#!/usr/bin/env bash
 # ==============================================================================
-# 🌉 Sanaei Universal VPN Bridge Gateway
-# Routes WireGuard / OpenVPN / L2TP transparently to Sanaei V2Ray!
+# 🌉 Sanaei Multi-Inbound Dedicated Bridge Gateway
+# Routes each WireGuard / OpenVPN Inbound port independently to its exact
+# corresponding Sanaei V2Ray Inbound!
 # ==============================================================================
 
 RED='\\033[0;31m'
@@ -2537,10 +2596,10 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo -e "\${CYAN}==================================================================\${NC}"
-echo -e "\${CYAN}    🌉 Setting up Universal Dedicated Bridge Gateway             \${NC}"
+echo -e "\${CYAN}    🌉 Setting up Multi-Inbound Dedicated Bridge Gateway         \${NC}"
 echo -e "\${CYAN}==================================================================\${NC}"
 
-# 1. Install prerequisites (xray, wireguard, strongswan, xl2tpd, openvpn)
+# 1. Install prerequisites (xray, wireguard, strongswan, xl2tpd, ppp, openvpn)
 echo -e "\\${YELLOW}[1/4] Installing Xray-core and VPN daemons...\\${NC}"
 apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \\
   curl wget jq iptables iproute2 wireguard strongswan xl2tpd ppp openvpn net-tools
@@ -2560,38 +2619,21 @@ mkdir -p /usr/local/etc/xray
 curl -s "http://${host}/api/bridge/config" > /usr/local/etc/xray/config.json
 systemctl restart xray 2>/dev/null
 
-# 3. Setup Policy Routing & TPROXY Services
-echo -e "\${YELLOW}[3/4] Creating Dedicated Ports and Policy Tunnels...\${NC}"
+# 3. Setup Per-Inbound Dedicated Policy Routing & Services
+echo -e "\${YELLOW}[3/4] Creating Dedicated Ports and Policy Tunnels for ${inboundsList.length} Inbounds...\${NC}"
 systemctl daemon-reload
 
-# Setup IP routing table 100 for TPROXY
-ip rule del fwmark 100 2>/dev/null || true
-ip route del local default dev lo table 100 2>/dev/null || true
-ip route add local default dev lo table 100 2>/dev/null || true
-ip rule add fwmark 100 table 100 2>/dev/null || true
-
-# Mark packets from VPN subnets to TPROXY (Port 12345)
-iptables -t mangle -D PREROUTING -s 10.8.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
-iptables -t mangle -D PREROUTING -s 10.8.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
-iptables -t mangle -D PREROUTING -s 10.10.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
-iptables -t mangle -D PREROUTING -s 10.10.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
-iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
-iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
-
-iptables -t mangle -A PREROUTING -s 10.8.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100
-iptables -t mangle -A PREROUTING -s 10.8.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100
-iptables -t mangle -A PREROUTING -s 10.10.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100
-iptables -t mangle -A PREROUTING -s 10.10.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100
-iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100
-iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100
+${multiInboundSetupBash}
 
 # Save iptables rules
 netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables.rules 2>/dev/null
 
 echo -e "\\${GREEN}==================================================================\\${NC}"
-echo -e "\${GREEN}  ✅ Universal Bridge Gateway is Active!                         \${NC}"
-echo -e "\${GREEN}  All VPN daemons are natively integrated with Xray-core         \${NC}"
-echo -e "\${GREEN}==================================================================\${NC}"
+echo -e "\${GREEN}  ✅ Multi-Inbound Dedicated Bridge Gateway is Active!          \${NC}"
+echo -e "\${GREEN}  Each Inbound has its own independent WireGuard / OpenVPN port. \${NC}"
+echo -e "\${GREEN}  Connecting to any profile routes strictly and solely through   \${NC}"
+echo -e "\${GREEN}  that specific Sanaei Inbound node!                             \${NC}"
+echo -e "\\${GREEN}==================================================================\\${NC}"
 `;
 
   res.setHeader("Content-Type", "text/plain");
@@ -3044,7 +3086,7 @@ app.get("/api/sub/:token/wireguard-conf", (req, res) => {
 
   const directServerIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
   const { host: serverIp, isBridge } = resolveConnectionHost(req, directServerIp);
-  const serverPort = isBridge ? (dbData.settings?.wgServerPort || 51820) : (inbound?.wgPort || inbound?.port || dbData.settings?.wgServerPort || 51820);
+  const serverPort = isBridge ? bridgePorts.wgPort : (inbound?.wgPort || inbound?.port || dbData.settings?.wgServerPort || 51820);
   const serverPub = inbound?.wgServerPublicKey || dbData.settings?.wgServerPublicKey || sub.wireguardPublicKey;
   const subIdx = dbData.subscriptions.findIndex((s) => s.id === sub.id);
   const safeSubIdx = subIdx >= 0 ? subIdx : 0;
@@ -3090,7 +3132,7 @@ app.get("/api/sub/:token/openvpn-ovpn", (req, res) => {
 
   const directServerIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
   const { host: serverIp, isBridge } = resolveConnectionHost(req, directServerIp);
-  const port = isBridge ? 1194 : (inbound?.openvpnPort || sub.openvpnPort || 1194);
+  const port = isBridge ? bridgePorts.openvpnPort : (inbound?.openvpnPort || sub.openvpnPort || 1194);
   const proto = inbound?.openvpnProto || sub.openvpnProto || "udp";
 
   const ovpnConfig = `# ----------------------------------------------------
