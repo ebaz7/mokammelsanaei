@@ -3475,10 +3475,8 @@ resolv-retry infinite
 nobind
 persist-key
 persist-tun
-remote-cert-tls server
 cipher AES-256-GCM
 data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
-auth SHA256
 verb 3
 keepalive 10 60
 

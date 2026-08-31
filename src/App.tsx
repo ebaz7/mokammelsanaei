@@ -389,10 +389,8 @@ resolv-retry infinite
 nobind
 persist-key
 persist-tun
-remote-cert-tls server
 cipher AES-256-GCM
 data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
-auth SHA256
 verb 3
 keepalive 10 60
 
@@ -421,11 +419,23 @@ B79ZDiZY9oniEIIaXWGbU4Y=
 
   const downloadBlob = (filename: string, textContent: string, mimeType: string = "text/plain") => {
     try {
+      // Automatically sanitize filename to be clean ASCII alphanumeric with hyphens/underscores.
+      // This prevents import bugs in WireGuard and other VPN clients on iOS, Android, and Windows.
+      const parts = filename.split(".");
+      const ext = parts.pop() || "txt";
+      const baseName = parts.join(".");
+      
+      let safeBase = baseName.replace(/[^a-zA-Z0-9_-]/g, "_");
+      safeBase = safeBase.replace(/__+/g, "_").replace(/^_+|_+$/g, "");
+      if (!safeBase) safeBase = "config";
+      
+      const safeFilename = `${safeBase}.${ext}`;
+      
       const blob = new Blob([textContent], { type: `${mimeType};charset=utf-8` });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = filename;
+      link.download = safeFilename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -812,11 +822,51 @@ B79ZDiZY9oniEIIaXWGbU4Y=
     }
   };
 
-  // Trigger copy indicator
+  // Trigger copy indicator with robust fallback for iframe constraints
   const triggerCopy = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text)
+          .then(() => {
+            setCopiedId(id);
+            setTimeout(() => setCopiedId(null), 2000);
+          })
+          .catch((err) => {
+            console.warn("Clipboard API failed, trying fallback:", err);
+            fallbackCopyText(text, id);
+          });
+      } else {
+        fallbackCopyText(text, id);
+      }
+    } catch (e) {
+      console.error("Clipboard copy failed entirely:", e);
+      fallbackCopyText(text, id);
+    }
+  };
+
+  const fallbackCopyText = (text: string, id: string) => {
+    try {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      // Position out of screen
+      textArea.style.top = "0";
+      textArea.style.left = "0";
+      textArea.style.position = "fixed";
+      textArea.style.opacity = "0";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      const successful = document.execCommand("copy");
+      document.body.removeChild(textArea);
+      if (successful) {
+        setCopiedId(id);
+        setTimeout(() => setCopiedId(null), 2000);
+      } else {
+        console.warn("execCommand copy returned false");
+      }
+    } catch (err) {
+      console.error("Fallback copy failed:", err);
+    }
   };
 
   // Add Panel
