@@ -255,6 +255,7 @@ export default function App() {
 PrivateKey = ${priv}
 Address = ${addr}
 DNS = ${dns}
+MTU = 1360
 
 [Peer]
 PublicKey = ${serverPub}

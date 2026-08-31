@@ -2511,7 +2511,12 @@ app.get("/api/bridge/config", (req, res) => {
       listen: "0.0.0.0",
       protocol: "dokodemo-door",
       settings: { network: "tcp,udp", followRedirect: true },
-      streamSettings: { sockopt: { tproxy: "tproxy" } }
+      streamSettings: { sockopt: { tproxy: "tproxy" } },
+      sniffing: {
+        enabled: true,
+        destOverride: ["http", "tls", "quic"],
+        metadataOnly: false
+      }
     });
 
     // 1. Fallback Outbound (uses default/fallback UUID)
@@ -2652,10 +2657,15 @@ if ! command -v xray >/dev/null 2>&1; then
   bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 fi
 
-# Enable IP forwarding
+# Enable IP forwarding and disable rp_filter for TPROXY routing stability
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 sysctl -w net.ipv4.conf.all.accept_redirects=0 >/dev/null
 sysctl -w net.ipv4.conf.all.send_redirects=0 >/dev/null
+sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
+sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null
+for interface in /proc/sys/net/ipv4/conf/*; do
+  sysctl -w net.ipv4.conf.$(basename $interface).rp_filter=0 >/dev/null 2>&1
+done
 
 # 2. Fetch Multi-Inbound Dynamic Xray Config
 echo -e "\${YELLOW}[2/6] Pulling Multi-Inbound Xray Routing Configuration...\${NC}"
