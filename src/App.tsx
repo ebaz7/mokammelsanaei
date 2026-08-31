@@ -55,6 +55,9 @@ export default function App() {
   const [isUpdatingWgPort, setIsUpdatingWgPort] = useState(false);
 
   // Bridge Tab States (V2Ray / Xray Middle Bridge Gateway)
+  const [selectedBridgeSubId, setSelectedBridgeSubId] = useState("sub-default");
+  const [selectedBridgeInboundId, setSelectedBridgeInboundId] = useState("");
+  const [showWgQrModal, setShowWgQrModal] = useState(false);
   const [bridgeSelectedInboundId, setBridgeSelectedInboundId] = useState<string>("");
   const [bridgeMode, setBridgeMode] = useState<"tun2socks" | "singbox" | "tproxy">("tun2socks");
   const [bridgeCustomLink, setBridgeCustomLink] = useState<string>("");
@@ -402,11 +405,15 @@ ${pass}
 
 <ca>
 -----BEGIN CERTIFICATE-----
-MIIBtzCCAV2gAwIBAgIJAK987F6A22-38DB-4B2E-8EFC-3E37CE001234MA0GCSqG
-SIb3DQEBCwUAMBgxFjAUBgNVBAMMDXNhbmFlaS1jYS1jZXJ0MB4XDTI2MDgyOTAx
-MDgwMFoXDTM2MDgyNzAxMDgwMFowGDEWMBQGA1UEAwwNc2FuYWVpLWNhLWNlcnQw
-gZ8wDQYJKoZIhvcNAQEBBQADgY0AMIGJAoGBAL/YmPj1e7zXyM2s9F8n6A22M38D
-B4B2E8EFC3E37CE60012344F46E5/10p1s2px3vsdF8=
+MIIBjTCCATOgAwIBAgIUIQIe31/z5nhITVjwyhir6eSRefQwCgYIKoZIzj0EAwIw
+HDEaMBgGA1UEAwwRU2FuYWVpLU9wZW5WUE4tQ0EwHhcNMjYwODI5MTQxOTM5WhcN
+MzYwODI2MTQxOTM5WjAcMRowGAYDVQQDDBFTYW5hZWktT3BlblZQTi1DQTBZMBMG
+ByqGSM49AgEGCCqGSM49AwEHA0IABL2P5tjMPrlrNMmP5KMSKEglsD060bX6bwg/
+hfPg8lmesnO0PE6kmtMhwc2iapZPBLsOm+NCQvIbPv9zwV/3pdKjUzBRMB0GA1Ud
+DgQWBBT2rKEY1n/X9LAvko1PZTcBu05Z3TAfBgNVHSMEGDAWgBT2rKEY1n/X9LAv
+ko1PZTcBu05Z3TAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gAMEUCIQCY
+QwT5y7Vhd9SsFIMIaclfBJO/sdpng/tiHw93G25rWQIgbCIRKx2j00YKgbrq/stE
+B79ZDiZY9oniEIIaXWGbU4Y=
 -----END CERTIFICATE-----
 </ca>
 `;
@@ -3283,6 +3290,272 @@ PersistentKeepalive = 25`}
                   </div>
                 </div>
 
+              </div>
+
+              {/* ۴. اتصال فوری کلاینت به پل ارتباطی (Instant Client Profiles) */}
+              <div className="bg-linear-to-b from-indigo-50/50 to-white rounded-3xl border border-indigo-100 shadow-md p-6 sm:p-8 space-y-6">
+                <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 border-b border-indigo-100 pb-4">
+                  <div>
+                    <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                      <Key className="h-5 w-5 text-indigo-600" />
+                      {lang === "fa" ? "۴. دریافت کانکشن‌های پل برای کلاینت (Bridge Connection Profiles)" : "4. Instant Client Connection Profiles for Bridge"}
+                    </h3>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {lang === "fa" 
+                        ? "بدون نیاز به رفتن به منوهای دیگر، برای هر کاربر خروجی‌های وایرگارد، L2TP و OpenVPN با آدرس پل را دانلود کنید." 
+                        : "Directly view and download WireGuard files, L2TP credentials, and OpenVPN profiles formatted for the bridge."}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+                    {/* Subscriber Select */}
+                    <div className="flex flex-col space-y-1 w-full sm:w-auto min-w-[200px]">
+                      <label className="text-[10px] font-bold text-gray-400 uppercase">
+                        {lang === "fa" ? "انتخاب کاربر (Subscription)" : "Select Subscriber"}
+                      </label>
+                      <select
+                        value={selectedBridgeSubId}
+                        onChange={(e) => setSelectedBridgeSubId(e.target.value)}
+                        className="bg-white border border-gray-200 text-xs font-semibold px-3 py-2 rounded-xl text-gray-700 focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
+                      >
+                        {subs.map((sub) => (
+                          <option key={sub.id} value={sub.id}>
+                            {sub.username} ({sub.isActive ? (lang === "fa" ? "فعال" : "Active") : (lang === "fa" ? "غیرفعال" : "Inactive")})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Egress Node Select */}
+                    <div className="flex flex-col space-y-1 w-full sm:w-auto min-w-[200px]">
+                      <label className="text-[10px] font-bold text-gray-400 uppercase">
+                        {lang === "fa" ? "انتخاب نود خروجی سنایی" : "Egress Sanaei Node"}
+                      </label>
+                      <select
+                        value={selectedBridgeInboundId}
+                        onChange={(e) => setSelectedBridgeInboundId(e.target.value)}
+                        className="bg-white border border-gray-200 text-xs font-semibold px-3 py-2 rounded-xl text-gray-700 focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
+                      >
+                        {inbounds.map((inb) => (
+                          <option key={inb.id} value={inb.id}>
+                            {inb.tag} ({inb.serverIp})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                {(() => {
+                  const activeSub = subs.find(s => s.id === selectedBridgeSubId) || subs[0];
+                  const activeInboundNode = inbounds.find(i => i.id === selectedBridgeInboundId) || inbounds[0] || getActiveInbound();
+
+                  if (!activeSub) {
+                    return (
+                      <div className="text-center py-6 text-gray-500 text-xs">
+                        {lang === "fa" ? "هیچ کاربر فعالی یافت نشد." : "No subscribers found."}
+                      </div>
+                    );
+                  }
+
+                  const inbIdx = inbounds.findIndex((i) => i.id === activeInboundNode?.id);
+                  const safeIdx = inbIdx >= 0 ? inbIdx : 0;
+                  const wgPort = activeInboundNode?.bridgeWgPort || (51820 + safeIdx);
+                  const ovpnPort = activeInboundNode?.bridgeOpenvpnPort || (1194 + safeIdx);
+                  const serverIp = resolveEffectiveHost(activeInboundNode?.serverIp, activeSub.l2tpServerIp);
+
+                  return (
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                      
+                      {/* 1. WireGuard Card */}
+                      <div className="bg-white rounded-2xl border border-emerald-100 p-5 space-y-4 shadow-xs relative">
+                        <div className="flex items-center justify-between">
+                          <span className="bg-emerald-50 text-emerald-700 font-bold text-[10px] px-2 py-0.5 rounded-md">
+                            WireGuard (TPROXY)
+                          </span>
+                          <Smartphone className="h-4 w-4 text-emerald-600" />
+                        </div>
+                        
+                        <div>
+                          <h4 className="text-sm font-bold text-gray-900">
+                            {lang === "fa" ? "کانکشن وایرگارد پل" : "WireGuard Bridge Connection"}
+                          </h4>
+                          <p className="text-[11px] text-gray-500 mt-1">
+                            {lang === "fa" 
+                              ? "این کانفیگ به آی‌پی ورودی پل متصل می‌شود و داده‌ها را به تونل وایرگارد می‌فرستد." 
+                              : "Tunnel client through stealth WireGuard to the bridge gateway."}
+                          </p>
+                        </div>
+
+                        <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 space-y-1.5 font-mono text-[10px] text-gray-700">
+                          <div><strong className="text-gray-900">Endpoint:</strong> {serverIp}:{wgPort}</div>
+                          <div><strong className="text-gray-900">Allowed IPs:</strong> 0.0.0.0/0</div>
+                          <div className="truncate"><strong className="text-gray-900">Client Address:</strong> {activeSub.wireguardAddress || "10.8.0.100/24"}</div>
+                        </div>
+
+                        <div className="flex items-center gap-2 pt-2">
+                          <button
+                            onClick={() => {
+                              const conf = getWireguardConf(activeSub, activeInboundNode);
+                              downloadBlob(`wg_bridge_${activeSub.username}_${activeInboundNode?.tag || "node"}.conf`, conf, "text/plain");
+                            }}
+                            className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all border-0"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            <span>{lang === "fa" ? "دانلود فایل" : "Download .conf"}</span>
+                          </button>
+                          <button
+                            onClick={() => setShowWgQrModal(true)}
+                            className="bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all"
+                          >
+                            <QrCode className="h-3.5 w-3.5" />
+                            <span>{lang === "fa" ? "بارکد" : "QR"}</span>
+                          </button>
+                        </div>
+
+                        {/* WireGuard QR Code Modal Overlay */}
+                        {showWgQrModal && (
+                          <div className="fixed inset-0 bg-black/65 flex items-center justify-center z-50 animate-fade-in p-4">
+                            <div className="bg-white rounded-3xl p-6 max-w-sm w-full space-y-4 border border-gray-100 text-center relative shadow-2xl">
+                              <h3 className="text-sm font-bold text-gray-900">
+                                {lang === "fa" ? `اسکن بارکد وایرگارد (${activeSub.username})` : `Scan WireGuard QR Code (${activeSub.username})`}
+                              </h3>
+                              <p className="text-[10px] text-gray-500">
+                                {lang === "fa"
+                                  ? `متصل به نود سنایی خروجی: ${activeInboundNode?.tag || 'پیش‌فرض'}`
+                                  : `Routed via Egress: ${activeInboundNode?.tag || 'Default'}`}
+                              </p>
+                              <div className="flex justify-center p-4 bg-gray-50 rounded-2xl border border-gray-100 max-w-[200px] mx-auto">
+                                <QRCodeSVG
+                                  value={getWireguardConf(activeSub, activeInboundNode)}
+                                  size={170}
+                                  level="M"
+                                  marginSize={1}
+                                />
+                              </div>
+                              <button
+                                onClick={() => setShowWgQrModal(false)}
+                                className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold py-2 rounded-xl text-xs cursor-pointer transition-all"
+                              >
+                                {lang === "fa" ? "بستن بارکد" : "Close"}
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 2. L2TP Card */}
+                      <div className="bg-white rounded-2xl border border-indigo-100 p-5 space-y-4 shadow-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="bg-indigo-50 text-indigo-700 font-bold text-[10px] px-2 py-0.5 rounded-md">
+                            L2TP / IPSec PSK
+                          </span>
+                          <Layers className="h-4 w-4 text-indigo-600" />
+                        </div>
+
+                        <div>
+                          <h4 className="text-sm font-bold text-gray-900">
+                            {lang === "fa" ? "کانکشن L2TP پل" : "L2TP/IPSec Bridge Settings"}
+                          </h4>
+                          <p className="text-[11px] text-gray-500 mt-1">
+                            {lang === "fa" 
+                              ? "اتصال بومی بدون نیاز به اپلیکیشن خارجی برای ویندوز، مک و اندروید." 
+                              : "Native OS VPN client connection for Windows, macOS, Android, iOS."}
+                          </p>
+                        </div>
+
+                        <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 space-y-1.5 font-mono text-[10px] text-gray-700">
+                          <div className="flex justify-between">
+                            <span><strong>Server IP:</strong> {serverIp}</span>
+                            <button onClick={() => triggerCopy(serverIp, "l2tp_srv")} className="text-gray-400 hover:text-gray-900"><Copy className="h-3 w-3" /></button>
+                          </div>
+                          <div className="flex justify-between">
+                            <span><strong>PSK (IPSec Key):</strong> {activeSub.l2tpPsk || customL2tpPsk}</span>
+                            <button onClick={() => triggerCopy(activeSub.l2tpPsk || customL2tpPsk, "l2tp_psk")} className="text-gray-400 hover:text-gray-900"><Copy className="h-3 w-3" /></button>
+                          </div>
+                          <div className="flex justify-between">
+                            <span><strong>Username:</strong> {activeSub.l2tpUser || `vpn_${activeSub.username}`}</span>
+                            <button onClick={() => triggerCopy(activeSub.l2tpUser || `vpn_${activeSub.username}`, "l2tp_user")} className="text-gray-400 hover:text-gray-900"><Copy className="h-3 w-3" /></button>
+                          </div>
+                          <div className="flex justify-between">
+                            <span><strong>Password:</strong> {activeSub.l2tpPass}</span>
+                            <button onClick={() => triggerCopy(activeSub.l2tpPass, "l2tp_pass")} className="text-gray-400 hover:text-gray-900"><Copy className="h-3 w-3" /></button>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 pt-2">
+                          <button
+                            onClick={() => {
+                              const mobileconfig = getAppleMobileConfig(activeSub, activeInboundNode);
+                              downloadBlob(`${activeSub.username}_l2tp_bridge.mobileconfig`, mobileconfig, "application/x-apple-aspen-config");
+                            }}
+                            className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all border-0"
+                          >
+                            <Smartphone className="h-3.5 w-3.5" />
+                            <span>{lang === "fa" ? "پروفایل آیفون" : ".mobileconfig"}</span>
+                          </button>
+                          <button
+                            onClick={() => {
+                              const pbk = getWindowsPbk(activeSub, activeInboundNode);
+                              downloadBlob(`${activeSub.username}_l2tp_bridge.pbk`, pbk, "application/octet-stream");
+                            }}
+                            className="bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-800 font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all"
+                          >
+                            <Monitor className="h-3.5 w-3.5" />
+                            <span>{lang === "fa" ? "دایلر ویندوز" : ".pbk"}</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* 3. OpenVPN Card */}
+                      <div className="bg-white rounded-2xl border border-amber-100 p-5 space-y-4 shadow-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="bg-amber-50 text-amber-700 font-bold text-[10px] px-2 py-0.5 rounded-md">
+                            OpenVPN (TCP/UDP)
+                          </span>
+                          <Lock className="h-4 w-4 text-amber-600" />
+                        </div>
+
+                        <div>
+                          <h4 className="text-sm font-bold text-gray-900">
+                            {lang === "fa" ? "کانکشن OpenVPN پل" : "OpenVPN Bridge Connection"}
+                          </h4>
+                          <p className="text-[11px] text-gray-500 mt-1">
+                            {lang === "fa" 
+                              ? "این اتصال، ترافیک اوپن‌وی‌پی‌ان کلاینت را از طریق پورت و تونل اختصاصی پل رد می‌کند." 
+                              : "Robust OpenVPN bridge routing profile with secure back-end verification."}
+                          </p>
+                        </div>
+
+                        <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 space-y-1.5 font-mono text-[10px] text-gray-700">
+                          <div><strong className="text-gray-900">Remote:</strong> {serverIp}:{ovpnPort}</div>
+                          <div className="flex justify-between">
+                            <span><strong className="text-gray-900">User:</strong> {activeSub.openvpnUser || `vpn_${activeSub.username}`}</span>
+                            <button onClick={() => triggerCopy(activeSub.openvpnUser || `vpn_${activeSub.username}`, "ovpn_user_b")} className="text-gray-400 hover:text-gray-900"><Copy className="h-3 w-3" /></button>
+                          </div>
+                          <div className="flex justify-between">
+                            <span><strong className="text-gray-900">Pass:</strong> {activeSub.openvpnPass || "SanaeiOVPNPass"}</span>
+                            <button onClick={() => triggerCopy(activeSub.openvpnPass || "SanaeiOVPNPass", "ovpn_pass_b")} className="text-gray-400 hover:text-gray-900"><Copy className="h-3 w-3" /></button>
+                          </div>
+                        </div>
+
+                        <div className="pt-2">
+                          <button
+                            onClick={() => {
+                              const conf = getOpenVpnConfig(activeSub, activeInboundNode);
+                              downloadBlob(`ovpn_bridge_${activeSub.username}_${activeInboundNode?.tag || "node"}.ovpn`, conf, "text/plain");
+                            }}
+                            className="w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-2 px-3 rounded-xl text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all border-0"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            <span>{lang === "fa" ? "دانلود پروفایل اوپن وی پی ان" : "Download OpenVPN Profile"}</span>
+                          </button>
+                        </div>
+                      </div>
+
+                    </div>
+                  );
+                })()}
               </div>
 
             </div>

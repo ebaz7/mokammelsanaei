@@ -61,6 +61,10 @@ export interface SmartSubscription {
   openvpnProto: 'udp' | 'tcp';
   autoSwitchEnabled: boolean;
   lastUpdated: string;
+  isActive?: boolean;
+  trafficLimitGB?: number;
+  trafficUsedGB?: number;
+  expiresAt?: string;
 }
 
 export interface MockNode {

@@ -23,6 +23,17 @@ fi
 INSTALL_DIR="/opt/sanaei-smart-sub"
 SERVICE_NAME="sanaei-smart-sub"
 
+get_panel_port() {
+  local port=3000
+  if [ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]; then
+    local svc_port=$(grep "Environment=PORT=" "/etc/systemd/system/${SERVICE_NAME}.service" | awk -F'=' '{print $NF}' | tr -d '\r')
+    if [[ "$svc_port" =~ ^[0-9]+$ ]]; then
+      port=$svc_port
+    fi
+  fi
+  echo "$port"
+}
+
 show_logo() {
   echo -e "${CYAN}"
   echo "=========================================================="
@@ -498,8 +509,18 @@ EOF
 # Read username and password from file passed by OpenVPN
 USERNAME=$(head -n 1 "$1")
 PASSWORD=$(tail -n 1 "$1")
+
+# Detect panel port
+PORT=3000
+if [ -f "/etc/systemd/system/sanaei-smart-sub.service" ]; then
+  svc_port=$(grep "Environment=PORT=" "/etc/systemd/system/sanaei-smart-sub.service" | awk -F'=' '{print $NF}' | tr -d '\r')
+  if [[ "$svc_port" =~ ^[0-9]+$ ]]; then
+    PORT=$svc_port
+  fi
+fi
+
 # Query local Sanaei Smart Sub API to verify
-STATUS=$(curl -s -X POST http://127.0.0.1:3000/api/auth-vpn -d "username=$USERNAME&password=$PASSWORD" -H "Content-Type: application/x-www-form-urlencoded")
+STATUS=$(curl -s -X POST "http://127.0.0.1:${PORT}/api/auth-vpn" -d "username=$USERNAME&password=$PASSWORD" -H "Content-Type: application/x-www-form-urlencoded")
 if [ "$STATUS" = "OK" ]; then
   exit 0
 else
@@ -606,8 +627,9 @@ setup_v2ray_middle_bridge() {
   echo -e "${YELLOW}تونل ضد فیلتر Xray/V2Ray (VLESS REALITY / VMess / Trojan) به سرور خارج هدایت می‌کند.${NC}"
   echo ""
 
-  echo -e "${BLUE}[1/1] Fetching dynamic bridge configuration from local panel...${NC}"
-  curl -s http://127.0.0.1:3000/install-bridge.sh | bash
+  local panel_port=$(get_panel_port)
+  echo -e "${BLUE}[1/1] Fetching dynamic bridge configuration from local panel (port ${panel_port})...${NC}"
+  curl -s "http://127.0.0.1:${panel_port}/install-bridge.sh" | bash
 
   echo -e "${GREEN}==================================================================${NC}"
   echo -e "${GREEN}  ✅ V2Ray Middle Bridge successfully configured and active!     ${NC}"

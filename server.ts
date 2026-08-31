@@ -65,6 +65,10 @@ interface SmartSubscription {
   openvpnProto: 'udp' | 'tcp';
   autoSwitchEnabled: boolean;
   lastUpdated: string;
+  isActive?: boolean;
+  trafficLimitGB?: number;
+  trafficUsedGB?: number;
+  expiresAt?: string;
 }
 
 interface InboundNode {
@@ -295,18 +299,50 @@ function initDb(): DB {
     }
   }
 
-  // Validate existing subscriptions keys
-  if (Array.isArray(dbDataObj.subscriptions)) {
-    dbDataObj.subscriptions.forEach((sub, idx) => {
-      if (!isValidBase64WgKey(sub.wireguardPrivateKey) || !isValidBase64WgKey(sub.wireguardPublicKey)) {
-        const generated = generateWireGuardKeys();
-        sub.wireguardPrivateKey = generated.privateKey;
-        sub.wireguardPublicKey = generated.publicKey;
-      }
-      const clientIp = `10.8.0.${100 + idx}`;
-      sub.wireguardAddress = `${clientIp}/24`;
+  // Validate existing subscriptions keys or auto-populate a default subscriber
+  if (!dbDataObj.subscriptions) {
+    dbDataObj.subscriptions = [];
+  }
+  if (dbDataObj.subscriptions.length === 0) {
+    const keys = generateWireGuardKeys();
+    dbDataObj.subscriptions.push({
+      id: "sub-default",
+      panelId: "panel-default",
+      panelName: "Default Panel",
+      username: "bridge_user",
+      uuid: "11111111-2222-3333-4444-555555555555",
+      inboundId: 1,
+      l2tpUser: "vpn_bridge",
+      l2tpPass: "SanaeiL2TPPass",
+      l2tpServerIp: "",
+      l2tpPsk: dbDataObj.settings?.l2tpPsk || "SanaeiL2TPSecureKey",
+      wireguardPrivateKey: keys.privateKey,
+      wireguardPublicKey: keys.publicKey,
+      wireguardAddress: "10.8.0.100/24",
+      wireguardDns: dbDataObj.settings?.wgServerDns || "1.1.1.1, 8.8.8.8",
+      openvpnUser: "vpn_bridge",
+      openvpnPass: "SanaeiOVPNPass",
+      openvpnPort: 1194,
+      openvpnProto: "udp",
+      autoSwitchEnabled: false,
+      lastUpdated: new Date().toISOString(),
+      isActive: true,
+      trafficLimitGB: 100,
+      trafficUsedGB: 0,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
     });
   }
+
+  dbDataObj.subscriptions.forEach((sub, idx) => {
+    if (!isValidBase64WgKey(sub.wireguardPrivateKey) || !isValidBase64WgKey(sub.wireguardPublicKey)) {
+      const generated = generateWireGuardKeys();
+      sub.wireguardPrivateKey = generated.privateKey;
+      sub.wireguardPublicKey = generated.publicKey;
+    }
+    const clientIp = `10.8.0.${100 + idx}`;
+    sub.wireguardAddress = `${clientIp}/24`;
+  });
 
   // Ensure default multi-inbounds exist with distinct IPs per node/country
   if (!dbDataObj.inbounds || dbDataObj.inbounds.length === 0) {
@@ -2547,7 +2583,7 @@ app.get("/install-bridge.sh", (req, res) => {
 # Inbound Node [${idx + 1}/${inboundsList.length}]: ${inb.tag} (${inb.serverIp}:${inb.port})
 # WireGuard Port: ${ports.wgPort} | OpenVPN Port: ${ports.openvpnPort} | TPROXY: ${ports.tproxyPort}
 # ==============================================================================
-echo -e "\\${CYAN}Configuring Dedicated Tunnel for Inbound: ${inb.tag} (WG Port ${ports.wgPort}, TPROXY ${ports.tproxyPort})...\\${NC}"
+echo -e "\${CYAN}Configuring Dedicated Tunnel for Inbound: ${inb.tag} (WG Port ${ports.wgPort}, TPROXY ${ports.tproxyPort})...\${NC}"
 
 # 1. Setup IP routing table ${ports.fwMark} for TPROXY
 ip rule del fwmark ${ports.fwMark} 2>/dev/null || true
@@ -2599,45 +2635,336 @@ echo -e "\${CYAN}===============================================================
 echo -e "\${CYAN}    🌉 Setting up Multi-Inbound Dedicated Bridge Gateway         \${NC}"
 echo -e "\${CYAN}==================================================================\${NC}"
 
+# Detect Main Network Interface
+MAIN_IFACE=$(ip route show default | awk '{print $5}' | head -n1)
+if [ -z "$MAIN_IFACE" ]; then
+  MAIN_IFACE="eth0"
+fi
+
 # 1. Install prerequisites (xray, wireguard, strongswan, xl2tpd, ppp, openvpn)
-echo -e "\\${YELLOW}[1/4] Installing Xray-core and VPN daemons...\\${NC}"
+echo -e "\${YELLOW}[1/6] Installing Xray-core and VPN daemons...\${NC}"
 apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \\
-  curl wget jq iptables iproute2 wireguard strongswan xl2tpd ppp openvpn net-tools
+  curl wget jq iptables iproute2 wireguard strongswan xl2tpd ppp openvpn net-tools openssl cron
 
 # Download Xray-core if not present
 if ! command -v xray >/dev/null 2>&1; then
-  echo -e "\\${YELLOW}Installing latest Xray-core...\\${NC}"
+  echo -e "\${YELLOW}Installing latest Xray-core...\${NC}"
   bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 fi
 
 # Enable IP forwarding
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
+sysctl -w net.ipv4.conf.all.accept_redirects=0 >/dev/null
+sysctl -w net.ipv4.conf.all.send_redirects=0 >/dev/null
 
 # 2. Fetch Multi-Inbound Dynamic Xray Config
-echo -e "\${YELLOW}[2/4] Pulling Multi-Inbound Xray Routing Configuration...\${NC}"
+echo -e "\${YELLOW}[2/6] Pulling Multi-Inbound Xray Routing Configuration...\${NC}"
 mkdir -p /usr/local/etc/xray
 curl -s "http://${host}/api/bridge/config" > /usr/local/etc/xray/config.json
 systemctl restart xray 2>/dev/null
 
-# 3. Setup Per-Inbound Dedicated Policy Routing & Services
-echo -e "\${YELLOW}[3/4] Creating Dedicated Ports and Policy Tunnels for ${inboundsList.length} Inbounds...\${NC}"
+# 3. Configure WireGuard Interfaces dynamically
+echo -e "\${YELLOW}[3/6] Setting up WireGuard interfaces...\${NC}"
+mkdir -p /etc/wireguard
+chmod 700 /etc/wireguard
+
+# Fetch active interfaces and download configs
+IFACES=$(curl -s "http://${host}/api/bridge/interfaces" | jq -r '.[]')
+for iface in $IFACES; do
+  echo -e "Setting up $iface..."
+  curl -s "http://${host}/api/bridge/wg-config/$iface" > "/etc/wireguard/\${iface}.conf"
+  systemctl enable "wg-quick@\${iface}" 2>/dev/null
+  systemctl restart "wg-quick@\${iface}" 2>/dev/null
+done
+
+# 4. Configure L2TP/IPSec
+echo -e "\${YELLOW}[4/6] Setting up L2TP/IPSec (StrongSwan & xl2tpd)...\${NC}"
+mkdir -p /etc/xl2tpd /etc/ppp
+
+# Write ipsec.conf
+cat <<EOF >/etc/ipsec.conf
+config setup
+  charondebug="ike 1, knl 1, cfg 0"
+  uniqueids=no
+
+conn L2TP-PSK-NAT
+  rightsubnet=vhost:%priv
+  also=L2TP-PSK-noNAT
+
+conn L2TP-PSK-noNAT
+  authby=secret
+  pfs=no
+  auto=add
+  keyingtries=3
+  dpddelay=30
+  dpdtimeout=120
+  dpdaction=clear
+  rekey=no
+  ikelifetime=8h
+  keylife=1h
+  type=transport
+  left=%any
+  leftprotoport=17/1701
+  right=%any
+  rightprotoport=17/%any
+EOF
+
+# Fetch L2TP secrets
+curl -s "http://${host}/api/bridge/ipsec-secrets" > /etc/ipsec.secrets
+chmod 600 /etc/ipsec.secrets
+
+# Write xl2tpd.conf
+cat <<EOF >/etc/xl2tpd/xl2tpd.conf
+[global]
+port = 1701
+
+[lns default]
+ip range = 10.9.0.2-10.9.0.254
+local ip = 10.9.0.1
+require chap = yes
+refuse pap = yes
+require authentication = yes
+name = l2tpd
+pppoptfile = /etc/ppp/options.xl2tpd
+length bit = yes
+EOF
+
+# Write options.xl2tpd
+cat <<EOF >/etc/ppp/options.xl2tpd
+ipcp-accept-local
+ipcp-accept-remote
+ms-dns 1.1.1.1
+ms-dns 8.8.8.8
+auth
+idle 1800
+mtu 1400
+mru 1400
+nodefaultroute
+connect-delay 5000
+lock
+proxyarp
+EOF
+
+# Fetch chap-secrets
+curl -s "http://${host}/api/bridge/chap-secrets" > /etc/ppp/chap-secrets
+chmod 600 /etc/ppp/chap-secrets
+
+# Restart StrongSwan and L2TP
+systemctl enable strongswan-starter 2>/dev/null || systemctl enable strongswan 2>/dev/null
+systemctl restart strongswan-starter 2>/dev/null || systemctl restart strongswan 2>/dev/null
+systemctl enable xl2tpd 2>/dev/null
+systemctl restart xl2tpd 2>/dev/null
+
+# 5. Configure OpenVPN with dynamic back-authentication
+echo -e "\${YELLOW}[5/6] Setting up OpenVPN Server...\${NC}"
+mkdir -p /etc/openvpn/server/ccd
+cd /etc/openvpn/server || exit
+
+# Download CA crt and key
+curl -s "http://${host}/api/bridge/ca.crt" > /etc/openvpn/server/ca.crt
+curl -s "http://${host}/api/bridge/ca.key" > /etc/openvpn/server/ca.key
+
+# Generate OpenVPN server certificate using CA
+openssl ecparam -name prime256v1 -genkey -out /etc/openvpn/server/server.key
+openssl req -new -key /etc/openvpn/server/server.key -out /etc/openvpn/server/server.csr -subj "/CN=Sanaei-Bridge-Server" -nodes
+openssl x509 -req -in /etc/openvpn/server/server.csr -CA /etc/openvpn/server/ca.crt -CAkey /etc/openvpn/server/ca.key -CAcreateserial -out /etc/openvpn/server/server.crt -days 3650
+
+# Securely remove CA key from bridge disk
+rm -f /etc/openvpn/server/ca.key
+
+# Create authenticated back-verification script pointing to the correct main panel
+cat <<'EOF' > /etc/openvpn/server/auth.sh
+#!/bin/bash
+USERNAME=$(head -n 1 "$1")
+PASSWORD=$(tail -n 1 "$1")
+STATUS=$(curl -s -X POST http://${host}/api/auth-vpn -d "username=$USERNAME&password=$PASSWORD" -H "Content-Type: application/x-www-form-urlencoded")
+if [ "$STATUS" = "OK" ]; then
+  exit 0
+else
+  exit 1
+fi
+EOF
+chmod +x /etc/openvpn/server/auth.sh
+
+# Write OpenVPN server.conf
+cat <<EOF >/etc/openvpn/server/server.conf
+port 1194
+proto udp
+dev tun1
+ca ca.crt
+cert server.crt
+key server.key
+dh none
+topology subnet
+server 10.10.0.0 255.255.255.0
+client-config-dir /etc/openvpn/server/ccd
+ifconfig-pool-persist ipp.txt
+keepalive 10 120
+cipher AES-256-GCM
+data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
+persist-key
+persist-tun
+status openvpn-status.log
+verb 3
+verify-client-cert none
+username-as-common-name
+script-security 3
+auth-user-pass-verify /etc/openvpn/server/auth.sh via-file
+EOF
+
+systemctl enable openvpn-server@server 2>/dev/null
+systemctl restart openvpn-server@server 2>/dev/null
+
+# 6. Setup Policy Routing & Auto-Sync Cron Job
+echo -e "\${YELLOW}[6/6] Finalizing Routing Policies and Synchronization Service...\${NC}"
 systemctl daemon-reload
 
 ${multiInboundSetupBash}
 
-# Save iptables rules
+# Setup NAT Masquerade forwarding
+iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -A FORWARD -s 10.8.0.0/16 -j ACCEPT
+iptables -A FORWARD -s 10.9.0.0/16 -j ACCEPT
+iptables -A FORWARD -s 10.10.0.0/16 -j ACCEPT
+iptables -t nat -A POSTROUTING -o \$MAIN_IFACE -j MASQUERADE
+
+# Save firewall rules
 netfilter-persistent save 2>/dev/null || iptables-save > /etc/iptables.rules 2>/dev/null
 
-echo -e "\\${GREEN}==================================================================\\${NC}"
+# Setup Automated Sync Script
+cat <<'EOF' > /usr/local/bin/vpn-bridge-sync.sh
+#!/usr/bin/env bash
+# Autogenerated peer list synchronization client for Sanaei Bridge
+HOST="${host}"
+
+# 1. Sync WireGuard Configs
+IFACES=$(curl -s "http://\$HOST/api/bridge/interfaces" | jq -r '.[]' 2>/dev/null)
+for iface in \$IFACES; do
+  curl -s "http://\$HOST/api/bridge/wg-config/\$iface" > "/etc/wireguard/\${iface}.tmp"
+  if [ -s "/etc/wireguard/\${iface}.tmp" ]; then
+    if ! cmp -s "/etc/wireguard/\${iface}.conf" "/etc/wireguard/\${iface}.tmp"; then
+      mv "/etc/wireguard/\${iface}.tmp" "/etc/wireguard/\${iface}.conf"
+      wg syncconf "\$iface" <(wg-quick strip "\$iface") 2>/dev/null || systemctl restart "wg-quick@\$iface"
+    else
+      rm "/etc/wireguard/\${iface}.tmp"
+    fi
+  fi
+done
+
+# 2. Sync L2TP Chap Secrets
+curl -s "http://\$HOST/api/bridge/chap-secrets" > /etc/ppp/chap-secrets.tmp
+if [ -s /etc/ppp/chap-secrets.tmp ]; then
+  if ! cmp -s /etc/ppp/chap-secrets /etc/ppp/chap-secrets.tmp; then
+    mv /etc/ppp/chap-secrets.tmp /etc/ppp/chap-secrets
+    chmod 600 /etc/ppp/chap-secrets
+  else
+    rm /etc/ppp/chap-secrets.tmp
+  fi
+fi
+
+# 3. Sync IPSec Secrets
+curl -s "http://\$HOST/api/bridge/ipsec-secrets" > /etc/ipsec.secrets.tmp
+if [ -s /etc/ipsec.secrets.tmp ]; then
+  if ! cmp -s /etc/ipsec.secrets /etc/ipsec.secrets.tmp; then
+    mv /etc/ipsec.secrets.tmp /etc/ipsec.secrets
+    chmod 600 /etc/ipsec.secrets
+    systemctl reload strongswan 2>/dev/null || systemctl reload strongswan-starter 2>/dev/null
+  else
+    rm /etc/ipsec.secrets.tmp
+  fi
+fi
+EOF
+chmod +x /usr/local/bin/vpn-bridge-sync.sh
+
+# Install Cron Sync (runs every minute)
+crontab -l 2>/dev/null | grep -v "vpn-bridge-sync.sh" | { cat; echo "* * * * * /usr/local/bin/vpn-bridge-sync.sh >/dev/null 2>&1"; } | crontab -
+
+echo -e "\${GREEN}==================================================================\${NC}"
 echo -e "\${GREEN}  ✅ Multi-Inbound Dedicated Bridge Gateway is Active!          \${NC}"
 echo -e "\${GREEN}  Each Inbound has its own independent WireGuard / OpenVPN port. \${NC}"
 echo -e "\${GREEN}  Connecting to any profile routes strictly and solely through   \${NC}"
 echo -e "\${GREEN}  that specific Sanaei Inbound node!                             \${NC}"
-echo -e "\\${GREEN}==================================================================\\${NC}"
+echo -e "\${GREEN}  Automated real-time background desync-check active (1m cron).  \${NC}"
+echo -e "\${GREEN}==================================================================\${NC}"
 `;
 
   res.setHeader("Content-Type", "text/plain");
   res.send(script);
+});
+
+// --- Dynamic Bridge Sync and Configuration API Endpoints ---
+app.get("/api/bridge/interfaces", (req, res) => {
+  const inboundsList = dbData.inbounds.length > 0 ? dbData.inbounds : [
+    { id: "in-default", tag: "Default Inbound" }
+  ];
+  const list = inboundsList.map((_, idx) => `wg${idx}`);
+  res.json(list);
+});
+
+app.get("/api/bridge/wg-config/:interface", (req, res) => {
+  const iface = req.params.interface;
+  const inbIdx = parseInt(iface.replace("wg", "")) || 0;
+  const inboundsList = dbData.inbounds.length > 0 ? dbData.inbounds : [
+    { id: "in-default", tag: "Default Inbound" }
+  ];
+  const inb = inboundsList[inbIdx];
+  if (!inb) {
+    return res.status(404).send("# Inbound not found");
+  }
+  const ports = getInboundBridgePorts(inb, inbIdx);
+  const serverPrivateKey = dbData.settings?.wgServerPrivateKey;
+
+  let conf = `[Interface]\n`;
+  conf += `PrivateKey = ${serverPrivateKey}\n`;
+  conf += `Address = ${ports.wgServerIp}/24\n`;
+  conf += `ListenPort = ${ports.wgPort}\n`;
+  conf += `PostUp = iptables -A FORWARD -i ${iface} -j ACCEPT; iptables -A FORWARD -o ${iface} -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -A POSTROUTING -s ${ports.wgSubnet} -o $(ip route show default | awk '{print $5}' | head -n1) -j MASQUERADE; iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n`;
+  conf += `PostDown = iptables -D FORWARD -i ${iface} -j ACCEPT; iptables -D FORWARD -o ${iface} -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -D POSTROUTING -s ${ports.wgSubnet} -o $(ip route show default | awk '{print $5}' | head -n1) -j MASQUERADE; iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu\n\n`;
+
+  dbData.subscriptions.forEach((sub, subIdx) => {
+    if (sub.isActive === false) return;
+    const clientIp = `10.8.${ports.subnetIndex}.${100 + subIdx}`;
+    conf += `# User: ${sub.username}\n`;
+    conf += `[Peer]\n`;
+    conf += `PublicKey = ${sub.wireguardPublicKey}\n`;
+    conf += `AllowedIPs = ${clientIp}/32\n\n`;
+  });
+
+  res.setHeader("Content-Type", "text/plain");
+  res.send(conf);
+});
+
+app.get("/api/bridge/chap-secrets", (req, res) => {
+  let chapContent = `# Autogenerated by Sanaei Smart Subscription Companion\n\n`;
+  dbData.subscriptions.forEach((sub, idx) => {
+    if (sub.isActive === false) return;
+    if (sub.l2tpUser && sub.l2tpPass) {
+      chapContent += `"${sub.l2tpUser}" * "${sub.l2tpPass}" 10.9.0.${100 + idx}\n`;
+    }
+  });
+  res.setHeader("Content-Type", "text/plain");
+  res.send(chapContent);
+});
+
+app.get("/api/bridge/ipsec-secrets", (req, res) => {
+  const psk = dbData.settings?.l2tpPsk || "SanaeiL2TPSecureKey";
+  res.setHeader("Content-Type", "text/plain");
+  res.send(`: PSK "${psk}"`);
+});
+
+app.get("/api/bridge/ca.crt", (req, res) => {
+  res.setHeader("Content-Type", "text/plain");
+  res.send(OPENVPN_VALID_CA);
+});
+
+app.get("/api/bridge/ca.key", (req, res) => {
+  const OPENVPN_VALID_CA_KEY = `-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgfXU18XqF2vJ6V05z
+m/q29/81bH9q+qV8D9H+uY8X8IahRANCAAS9j+bYzD65azTJj+SjEihIJbA9OtG1
++m8IP4Xz4PJZnrJztDxOpJrTIcHNomqWTwS7DpvjQkLyGz7/c8Ff96XS
+-----END PRIVATE KEY-----`;
+  res.setHeader("Content-Type", "text/plain");
+  res.send(OPENVPN_VALID_CA_KEY);
 });
 
 
