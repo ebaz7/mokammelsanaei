@@ -2584,27 +2584,11 @@ app.get("/api/bridge/config", (req, res) => {
 
 // 3. Generate Complete Multi-Inbound Linux Bash Bridge Installer Script
 app.get("/install-bridge.sh", (req, res) => {
-  const activePanel = dbData.panels.find((p: any) => p.isActive) || {
-    url: "https://jeimi.namzani.shop:8080/8090/",
-    apiToken: "9LdGANymWpfGgq4WX9BarEvEYzfsYO768Gywyv2rzWP4WyG5"
-  };
-
-  const panelUrl = activePanel.url || "https://jeimi.namzani.shop:8080/8090/";
-  const apiToken = activePanel.apiToken || "9LdGANymWpfGgq4WX9BarEvEYzfsYO768Gywyv2rzWP4WyG5";
-
-  // Parse panel domain name
-  let panelDomain = "jeimi.namzani.shop";
-  try {
-    const cleanUrl = panelUrl.replace("https://", "").replace("http://", "");
-    panelDomain = cleanUrl.split(":")[0].split("/")[0];
-  } catch (e) {
-    // fallback
-  }
+  const host = req.headers.host || "127.0.0.1";
 
   const script = `#!/usr/bin/env bash
 # ==============================================================================
-# 🌉 Sanaei Multi-Inbound 100% Direct Bridge Gateway
-# Connects directly to your panel without any middleman.
+# 🌉 Sanaei Multi-Inbound Robust Bridge Gateway
 # ==============================================================================
 
 RED='\\033[0;31m'
@@ -2613,19 +2597,19 @@ YELLOW='\\033[0;33m'
 CYAN='\\033[0;36m'
 NC='\\033[0m'
 
-if [ "$EUID" -ne 0 ]; then
+if [ "\$EUID" -ne 0 ]; then
   echo -e "\${RED}Error: Please run as root.\${NC}"
   exit 1
 fi
 
 echo -e "\${CYAN}==================================================================\${NC}"
-echo -e "\${CYAN}    🌉 Setting up Multi-Inbound 100% Direct Bridge Gateway       \${NC}"
+echo -e "\${CYAN}    🌉 Setting up Sanaei Multi-Inbound Bridge Gateway            \${NC}"
 echo -e "\${CYAN}==================================================================\${NC}"
 
 # 1. Install prerequisites
-echo -e "\${YELLOW}[1/5] Installing VPN daemons and Python3...\${NC}"
+echo -e "\${YELLOW}[1/4] Installing VPN daemons and requirements...\${NC}"
 apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \\
-  curl wget jq iptables iproute2 wireguard strongswan xl2tpd ppp openvpn net-tools openssl cron python3
+  curl wget jq iptables iproute2 wireguard strongswan xl2tpd ppp openvpn net-tools openssl cron
 
 # Download wireguard-go as fallback if kernel-space WireGuard is not supported (e.g. LXC)
 if ! ip link add dev wg-test-sys type wireguard 2>/dev/null; then
@@ -2640,7 +2624,7 @@ fi
 # Download Xray-core if not present
 if ! command -v xray >/dev/null 2>&1; then
   echo -e "\${YELLOW}Installing latest Xray-core...\${NC}"
-  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+  bash -c "\$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 fi
 
 # Set Xray to run as root to allow TPROXY binding
@@ -2660,20 +2644,30 @@ sysctl -w net.ipv4.conf.all.send_redirects=0 >/dev/null
 sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
 sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null
 for interface in /proc/sys/net/ipv4/conf/*; do
-  sysctl -w net.ipv4.conf.$(basename $interface).rp_filter=0 >/dev/null 2>&1
+  sysctl -w net.ipv4.conf.\$(basename \$interface).rp_filter=0 >/dev/null 2>&1
 done
 
-# 2. Write Local OpenVPN auth.sh
-echo -e "\${YELLOW}[2/5] Creating local OpenVPN authenticator...\${NC}"
+# 2. Write Local OpenVPN CA and Certs (Only if not already generated)
+echo -e "\${YELLOW}[2/4] Initializing OpenVPN CA and Server credentials...\${NC}"
 mkdir -p /etc/openvpn/server
+if [ ! -f /etc/openvpn/server/server.key ]; then
+  cd /etc/openvpn/server || exit
+  openssl genrsa -out ca.key 2048 2>/dev/null
+  openssl req -new -x509 -key ca.key -out ca.crt -subj "/CN=Sanaei-Bridge-CA" -days 3650 2>/dev/null
+  openssl genrsa -out server.key 2048 2>/dev/null
+  openssl req -new -key server.key -out server.csr -subj "/CN=Sanaei-Bridge-Server" 2>/dev/null
+  openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 3650 2>/dev/null
+fi
+
+# 3. Create Local OpenVPN Authenticator script
 cat <<'EOF' > /etc/openvpn/server/auth.sh
 #!/bin/bash
-USERNAME=$(head -n 1 "$1")
-PASSWORD=$(tail -n 1 "$1")
-if [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+USERNAME=\$(head -n 1 "\$1")
+PASSWORD=\$(tail -n 1 "\$1")
+if [ -z "\$USERNAME" ] || [ -z "\$PASSWORD" ]; then
   exit 1
 fi
-if grep -Fxq "$USERNAME:$PASSWORD" /etc/openvpn/server/users.txt; then
+if grep -Fxq "\$USERNAME:\$PASSWORD" /etc/openvpn/server/users.txt; then
   exit 0
 else
   exit 1
@@ -2681,534 +2675,219 @@ fi
 EOF
 chmod +x /etc/openvpn/server/auth.sh
 
-# Generate server certificate using a local CA
-echo -e "\${YELLOW}[3/5] Generating secure certificates...\${NC}"
-cd /etc/openvpn/server || exit
-openssl genrsa -out ca.key 2048
-openssl req -new -x509 -key ca.key -out ca.crt -subj "/CN=Sanaei-Bridge-CA" -days 3650
-openssl genrsa -out server.key 2048
-openssl req -new -key server.key -out server.csr -subj "/CN=Sanaei-Bridge-Server"
-openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 3650
-rm -f ca.key server.csr
+# 4. Install Live Sync Engine (runs every 1 minute via Cron)
+echo -e "\${YELLOW}[3/4] Installing background synchronization client...\${NC}"
+cat <<'EOF_SYNC' > /usr/local/bin/vpn-bridge-sync.sh
+#!/usr/bin/env bash
+# Autogenerated peer list synchronization client for Sanaei Bridge
+HOST="${host}"
+# Detect if we should use HTTP or HTTPS
+if [[ "\$HOST" == *"."* && "\$HOST" != "127.0.0.1" && "\$HOST" != "localhost" ]]; then
+  PROTO="https"
+else
+  PROTO="http"
+fi
+APP_URL="\${PROTO}://\${HOST}"
 
-# 3. Create the direct Python Sync Engine script
-echo -e "\${YELLOW}[4/5] Creating 100% direct sync engine (Direct-to-Panel)...\${NC}"
-cat <<'EOF' > /usr/local/bin/vpn-bridge-sync.py
-#!/usr/bin/env python3
-import os
-import sys
-import json
-import ssl
-import urllib.request
-import subprocess
+echo "Starting synchronization with \${APP_URL}..."
 
-PANEL_URL = "${panelUrl}"
-API_TOKEN = "${apiToken}"
-PANEL_DOMAIN = "${panelDomain}"
+# A. Sync WireGuard & OpenVPN Configs dynamically
+IFACES=\$(curl -k -s "\${APP_URL}/api/bridge/interfaces" | jq -r '.[]' 2>/dev/null)
+if [ -z "\$IFACES" ]; then
+  echo "Error: Empty or unreachable interface list from APP_URL."
+  exit 1
+fi
 
-def get_local_wireguard_key():
-    key_path = "/etc/wireguard/bridge_server.key"
-    pub_path = "/etc/wireguard/bridge_server.pub"
-    if os.path.exists(key_path) and os.path.exists(pub_path):
-        with open(key_path, "r") as f:
-            priv_key = f.read().strip()
-        with open(pub_path, "r") as f:
-            pub_key = f.read().strip()
-        return priv_key, pub_key
-    try:
-        priv_key = subprocess.check_output("wg genkey", shell=True).decode('utf-8').strip()
-        pub_key = subprocess.check_output(f"echo '{priv_key}' | wg pubkey", shell=True).decode('utf-8').strip()
-        os.makedirs("/etc/wireguard", exist_ok=True)
-        with open(key_path, "w") as f:
-            f.write(priv_key)
-        with open(pub_path, "w") as f:
-            f.write(pub_key)
-        os.chmod(key_path, 0o600)
-        return priv_key, pub_key
-    except Exception:
-        return "eOIn+B7f8f90m6o8Sj6Yx8n3K4XvU6b2LpT1g0d3V4E=", "p/X8K7bVvK0G6t6JmQ7M8d2L5vX4N1y0r6B7P5W3T4E="
+ACTIVE_IDXS=()
+for iface in \$IFACES; do
+  idx=\${iface#wg}
+  ACTIVE_IDXS+=("\$idx")
+  
+  # WireGuard Config Sync
+  curl -k -s "\${APP_URL}/api/bridge/wg-config/\$iface" > "/etc/wireguard/\${iface}.tmp"
+  if [ -s "/etc/wireguard/\${iface}.tmp" ]; then
+    if ! cmp -s "/etc/wireguard/\${iface}.conf" "/etc/wireguard/\${iface}.tmp"; then
+      mv "/etc/wireguard/\${iface}.tmp" "/etc/wireguard/\${iface}.conf"
+      chmod 600 "/etc/wireguard/\${iface}.conf"
+      wg syncconf "\$iface" <(wg-quick strip "\$iface") 2>/dev/null || systemctl restart "wg-quick@\$iface"
+    else
+      rm "/etc/wireguard/\${iface}.tmp"
+    fi
+  fi
+  systemctl enable "wg-quick@\$iface" 2>/dev/null
+  systemctl start "wg-quick@\$iface" 2>/dev/null
 
-def generate_xray_outbound(inb, auth_id, out_tag, address):
-    port = int(inb.get("port") or 443)
-    protocol = (inb.get("protocol") or "vless").lower()
-    
-    stream_settings = inb.get("streamSettings", {})
-    if isinstance(stream_settings, str):
-        try: stream_settings = json.loads(stream_settings)
-        except: stream_settings = {}
-        
-    settings = inb.get("settings", {})
-    if isinstance(settings, str):
-        try: settings = json.loads(settings)
-        except: settings = {}
+  # Dynamic OpenVPN Config Generation
+  ovpn_port=\$(($((1194)) + idx))
+  ovpn_server_ip="10.10.\${idx}.1"
+  ovpn_sub="10.10.\${idx}.0"
+  ovpn_iface="tun_inb_\${idx}"
+  ccd_dir="/etc/openvpn/server/ccd_inb_\${idx}"
+  mkdir -p "\$ccd_dir"
 
-    network = stream_settings.get("network", "tcp")
-    security = stream_settings.get("security", "none")
-    path = ""
-    if network == "ws":
-        path = stream_settings.get("wsSettings", {}).get("path", "")
-    elif network == "grpc":
-        path = stream_settings.get("grpcSettings", {}).get("serviceName", "")
-
-    tls_settings = stream_settings.get("tlsSettings", {})
-    xtls_settings = stream_settings.get("xtlsSettings", {})
-    reality_settings = stream_settings.get("realitySettings", {})
-    sni = (tls_settings.get("serverName") or 
-           xtls_settings.get("serverName") or 
-           (reality_settings.get("serverNames", [""])[0] if reality_settings.get("serverNames") else "") or
-           address)
-           
-    flow = ""
-    if settings.get("clients"):
-        flow = settings["clients"][0].get("flow", "")
-
-    if protocol == "vless":
-        return {
-            "tag": out_tag,
-            "protocol": "vless",
-            "settings": {
-                "vnext": [{
-                    "address": address,
-                    "port": port,
-                    "users": [{"id": auth_id, "encryption": "none", "flow": flow}]
-                }]
-            },
-            "streamSettings": {
-                "network": network,
-                "security": security,
-                "tlsSettings": {"serverName": sni} if security == "tls" else None,
-                "realitySettings": {
-                    "show": False,
-                    "fingerprint": "chrome",
-                    "serverName": sni,
-                    "publicKey": reality_settings.get("publicKey") or reality_settings.get("settings", {}).get("publicKey", ""),
-                    "shortId": reality_settings.get("shortIds", [""])[0] if reality_settings.get("shortIds") else "",
-                    "spiderX": reality_settings.get("spiderX") or reality_settings.get("settings", {}).get("spiderX", "")
-                } if security == "reality" else None,
-                "wsSettings": {"path": path} if network == "ws" else None,
-                "grpcSettings": {"serviceName": path} if network == "grpc" else None
-            }
-        }
-    elif protocol == "vmess":
-        return {
-            "tag": out_tag,
-            "protocol": "vmess",
-            "settings": {
-                "vnext": [{
-                    "address": address,
-                    "port": port,
-                    "users": [{"id": auth_id, "alterId": 0, "security": "auto"}]
-                }]
-            },
-            "streamSettings": {
-                "network": network,
-                "security": security,
-                "tlsSettings": {"serverName": sni} if security == "tls" else None,
-                "wsSettings": {"path": path} if network == "ws" else None,
-                "grpcSettings": {"serviceName": path} if network == "grpc" else None
-            }
-        }
-    elif protocol == "trojan":
-        return {
-            "tag": out_tag,
-            "protocol": "trojan",
-            "settings": {
-                "servers": [{"address": address, "port": port, "password": auth_id}]
-            },
-            "streamSettings": {
-                "network": network,
-                "security": security,
-                "tlsSettings": {"serverName": sni} if security == "tls" else None,
-                "wsSettings": {"path": path} if network == "ws" else None,
-                "grpcSettings": {"serviceName": path} if network == "grpc" else None
-            }
-        }
-    elif protocol == "shadowsocks":
-        return {
-            "tag": out_tag,
-            "protocol": "shadowsocks",
-            "settings": {
-                "servers": [{"address": address, "port": port, "method": settings.get("method", "aes-256-gcm"), "password": auth_id}]
-            }
-        }
-    return {
-        "tag": out_tag,
-        "protocol": "vless",
-        "settings": {
-            "vnext": [{"address": address, "port": port, "users": [{"id": auth_id, "encryption": "none"}]}]
-        }
-    }
-
-def main():
-    clean_url = PANEL_URL.rstrip('/')
-    inbounds_url = f"{clean_url}/panel/api/inbounds/list"
-    
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    
-    req = urllib.request.Request(
-        inbounds_url,
-        headers={
-            "Authorization": f"Bearer {API_TOKEN}",
-            "User-Agent": "Mozilla/5.0",
-            "Accept": "application/json"
-        }
-    )
-    
-    try:
-        with urllib.request.urlopen(req, context=ctx) as response:
-            if response.status != 200:
-                print(f"Error: Panel returned {response.status}")
-                sys.exit(1)
-            res_data = json.loads(response.read().decode('utf-8'))
-    except Exception as e:
-        print(f"Error fetching from panel: {e}")
-        sys.exit(1)
-        
-    if not res_data.get("success") or "obj" not in res_data:
-        print("Error: Invalid response format from panel")
-        sys.exit(1)
-        
-    raw_inbounds = res_data["obj"]
-    active_inbounds = [inb for inb in raw_inbounds if inb.get("enable") is not False]
-    active_inbounds.sort(key=lambda x: int(x.get("id", 0)))
-    
-    os.makedirs("/var/lib/vpn-bridge", exist_ok=True)
-    db_path = "/var/lib/vpn-bridge/db.json"
-    db = {"users": {}}
-    if os.path.exists(db_path):
-        try:
-            with open(db_path, "r") as f:
-                db = json.load(f)
-        except:
-            pass
-    if "users" not in db:
-        db["users"] = {}
-        
-    # Extract all unique client emails/emails
-    client_emails = set()
-    for inb in active_inbounds:
-        settings = inb.get("settings", {})
-        if isinstance(settings, str):
-            try: settings = json.loads(settings)
-            except: settings = {}
-        for c in settings.get("clients", []):
-            email = c.get("email") or c.get("username")
-            if email:
-                client_emails.add(email)
-                
-    sorted_emails = sorted(list(client_emails))
-    
-    clients_map = {}
-    for idx, email in enumerate(sorted_emails):
-        clients_map[email] = {
-            "index": idx,
-            "email": email,
-            "uuid": "",
-            "wg_keys": None
-        }
-        
-    # Match client email with their VLESS/Trojan UUID or password
-    for inb in active_inbounds:
-        protocol = (inb.get("protocol") or "vless").lower()
-        settings = inb.get("settings", {})
-        if isinstance(settings, str):
-            try: settings = json.loads(settings)
-            except: settings = {}
-        for c in settings.get("clients", []):
-            email = c.get("email") or c.get("username")
-            if not email:
-                continue
-            if protocol in ["vless", "vmess"]:
-                cid = c.get("id")
-                if cid:
-                    clients_map[email]["uuid"] = cid
-            elif protocol in ["trojan", "shadowsocks"]:
-                pw = c.get("password")
-                if pw:
-                    clients_map[email]["uuid"] = pw
-                    
-    # Generate stable WireGuard keys for VLESS users
-    db_changed = False
-    for email in sorted_emails:
-        if email not in db["users"]:
-            try:
-                priv = subprocess.check_output("wg genkey", shell=True).decode('utf-8').strip()
-                pub = subprocess.check_output(f"echo '{priv}' | wg pubkey", shell=True).decode('utf-8').strip()
-                db["users"][email] = {"private_key": priv, "public_key": pub}
-                db_changed = True
-            except:
-                db["users"][email] = {
-                    "private_key": "eOIn+B7f8f90m6o8Sj6Yx8n3K4XvU6b2LpT1g0d3V4E=",
-                    "public_key": "p/X8K7bVvK0G6t6JmQ7M8d2L5vX4N1y0r6B7P5W3T4E="
-                }
-        clients_map[email]["wg_keys"] = db["users"][email]
-        
-    if db_changed:
-        with open(db_path, "w") as f:
-            json.dump(db, f, indent=2)
-            
-    # --- Generate configs ---
-    local_srv_priv, local_srv_pub = get_local_wireguard_key()
-    
-    xray_inbounds = []
-    xray_outbounds = []
-    routing_rules = [
-        {"type": "field", "ip": ["geoip:private", "geoip:ir"], "outboundTag": "direct"}
-    ]
-    
-    # 1. WireGuard Configs
-    for idx, inb in enumerate(active_inbounds):
-        protocol = (inb.get("protocol") or "vless").lower()
-        wg_port = 51820 + idx
-        wg_subnet = f"10.8.{idx}.0/24"
-        wg_server_ip = f"10.8.{idx}.1"
-        wg_iface = f"wg{idx}"
-        
-        wg_conf = f"[Interface]\n"
-        wg_conf += f"PrivateKey = {local_srv_priv}\n"
-        wg_conf += f"Address = {wg_server_ip}/24\n"
-        wg_conf += f"ListenPort = {wg_port}\n"
-        
-        post_up = f"iptables -A FORWARD -i {wg_iface} -j ACCEPT; iptables -A FORWARD -o {wg_iface} -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -A POSTROUTING -s {wg_subnet} -o $(ip route show default | awk '{{print $5}}' | head -n1) -j MASQUERADE; iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
-        post_down = f"iptables -D FORWARD -i {wg_iface} -j ACCEPT; iptables -D FORWARD -o {wg_iface} -m state --state RELATED,ESTABLISHED -j ACCEPT; iptables -t nat -D POSTROUTING -s {wg_subnet} -o $(ip route show default | awk '{{print $5}}' | head -n1) -j MASQUERADE; iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
-        
-        wg_conf += f"PostUp = {post_up}\n"
-        wg_conf += f"PostDown = {post_down}\n\n"
-        
-        settings = inb.get("settings", {})
-        if isinstance(settings, str):
-            try: settings = json.loads(settings)
-            except: settings = {}
-            
-        if protocol in ["wireguard", "amneziawg"]:
-            for c in settings.get("clients", []):
-                pub = c.get("publicKey")
-                allowed_ips = c.get("allowedIPs", [])
-                if pub and allowed_ips:
-                    wg_conf += f"# User: {c.get('email', 'unknown')}\n"
-                    wg_conf += f"[Peer]\n"
-                    wg_conf += f"PublicKey = {pub}\n"
-                    wg_conf += f"AllowedIPs = {','.join(allowed_ips)}\n\n"
-        else:
-            for email, info in clients_map.items():
-                client_ip = f"10.8.{idx}.{100 + info['index']}/32"
-                wg_conf += f"# User: {email}\n"
-                wg_conf += f"[Peer]\n"
-                wg_conf += f"PublicKey = {info['wg_keys']['public_key']}\n"
-                wg_conf += f"AllowedIPs = {client_ip}\n\n"
-                
-        with open(f"/etc/wireguard/{wg_iface}.conf", "w") as f:
-            f.write(wg_conf)
-            
-        # Start/restart WireGuard
-        subprocess.run(f"systemctl enable wg-quick@{wg_iface} 2>/dev/null", shell=True)
-        subprocess.run(f"systemctl restart wg-quick@{wg_iface} 2>/dev/null", shell=True)
-        
-    # 2. OpenVPN Configs & CCD
-    for idx, inb in enumerate(active_inbounds):
-        ovpn_port = 1194 + idx
-        ovpn_subnet = f"10.10.{idx}.0"
-        ovpn_iface = f"tun_ovpn_{idx}"
-        ccd_dir = f"/etc/openvpn/server/ccd_inb_{idx}"
-        os.makedirs(ccd_dir, exist_ok=True)
-        
-        for email, info in clients_map.items():
-            client_ip = f"10.10.{idx}.{100 + info['index']}"
-            with open(f"{ccd_dir}/{email}", "w") as f:
-                f.write(f"ifconfig-push {client_ip} 255.255.255.0")
-                
-        ovpn_conf = f"""port {ovpn_port}
+  cat <<EOF > "/etc/openvpn/server/server_inb_\${idx}.conf.tmp"
+port \${ovpn_port}
 proto udp
-dev {ovpn_iface}
-ca ca.crt
-cert server.crt
-key server.key
+dev \${ovpn_iface}
+ca /etc/openvpn/server/ca.crt
+cert /etc/openvpn/server/server.crt
+key /etc/openvpn/server/server.key
 dh none
+server \${ovpn_server_ip} 255.255.255.0
 topology subnet
-server {ovpn_subnet} 255.255.255.0
-client-config-dir {ccd_dir}
-keepalive 10 120
-cipher AES-256-GCM
-data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
-persist-key
-persist-tun
-status openvpn-status_inb_{idx}.log
-verb 3
-verify-client-cert none
-username-as-common-name
-script-security 3
-auth-user-pass-verify /etc/openvpn/server/auth.sh via-file
 push "redirect-gateway def1 bypass-dhcp"
 push "dhcp-option DNS 1.1.1.1"
 push "dhcp-option DNS 8.8.8.8"
-"""
-        with open(f"/etc/openvpn/server/server_inb_{idx}.conf", "w") as f:
-            f.write(ovpn_conf)
-            
-        subprocess.run(f"systemctl enable openvpn-server@server_inb_{idx} 2>/dev/null", shell=True)
-        subprocess.run(f"systemctl restart openvpn-server@server_inb_{idx} 2>/dev/null", shell=True)
-        
-    # 3. OpenVPN Users text file
-    with open("/etc/openvpn/server/users.txt", "w") as f:
-        for email, info in clients_map.items():
-            if info["uuid"]:
-                f.write(f"{email}:{info['uuid']}\n")
-                
-    # 4. L2TP chap-secrets
-    chap_secrets = "# Autogenerated L2TP secrets\n"
-    for email, info in clients_map.items():
-        if info["uuid"]:
-            client_ip = f"10.9.0.{100 + info['index']}"
-            chap_secrets += f'"{email}" * "{info["uuid"]}" {client_ip}\n'
-    with open("/etc/ppp/chap-secrets", "w") as f:
-        f.write(chap_secrets)
-        
-    # Restart StrongSwan and L2TP
-    subprocess.run("systemctl reload strongswan 2>/dev/null || systemctl reload strongswan-starter 2>/dev/null", shell=True)
-    subprocess.run("systemctl restart xl2tpd 2>/dev/null", shell=True)
-    
-    # 5. Xray JSON Configuration
-    for idx, inb in enumerate(active_inbounds):
-        tproxy_port = 12345 + idx
-        in_tag = f"tproxy-in-{idx}"
-        
-        xray_inbounds.append({
-            "tag": in_tag,
-            "port": tproxy_port,
-            "listen": "0.0.0.0",
-            "protocol": "dokodemo-door",
-            "settings": {"network": "tcp,udp", "followRedirect": True},
-            "streamSettings": {"sockopt": {"tproxy": "tproxy"}},
-            "sniffing": {
-                "enabled": True,
-                "destOverride": ["http", "tls", "quic"],
-                "metadataOnly": False
-            }
-        })
-        
-        fallback_tag = f"out-inb-{idx}-fallback"
-        settings = inb.get("settings", {})
-        if isinstance(settings, str):
-            try: settings = json.loads(settings)
-            except: settings = {}
-        cls = settings.get("clients", [])
-        fallback_uuid = cls[0].get("id") or cls[0].get("password") if cls else "11111111-2222-3333-4444-555555555555"
-        
-        fallback_outbound = generate_xray_outbound(inb, fallback_uuid, fallback_tag, PANEL_DOMAIN)
-        xray_outbounds.append(fallback_outbound)
-        
-        # Add client-specific outbounds and routes
-        for email, info in clients_map.items():
-            if not info["uuid"]:
-                continue
-            client_out_tag = f"out-inb-{idx}-client-{info['index']}"
-            client_outbound = generate_xray_outbound(inb, info["uuid"], client_out_tag, PANEL_DOMAIN)
-            xray_outbounds.append(client_outbound)
-            
-            wg_client_ip = f"10.8.{idx}.{100 + info['index']}"
-            ovpn_client_ip = f"10.10.{idx}.{100 + info['index']}"
-            l2tp_client_ip = f"10.9.0.{100 + info['index']}"
-            
-            source_ips = [wg_client_ip, ovpn_client_ip, l2tp_client_ip] if idx == 0 else [wg_client_ip, ovpn_client_ip]
-            
-            routing_rules.append({
-                "type": "field",
-                "inboundTag": [in_tag],
-                "source": source_ips,
-                "outboundTag": client_out_tag
-            })
-            
-        # Fallback routing rule
-        routing_rules.append({
-            "type": "field",
-            "inboundTag": [in_tag],
-            "outboundTag": fallback_tag
-        })
-        
-    xray_outbounds.append({"tag": "direct", "protocol": "freedom", "settings": {}})
-    xray_outbounds.append({"tag": "block", "protocol": "blackhole", "settings": {}})
-    
-    xray_config = {
-        "log": {"loglevel": "warning"},
-        "inbounds": xray_inbounds,
-        "outbounds": xray_outbounds,
-        "routing": {
-            "domainStrategy": "IPIfNonMatch",
-            "rules": routing_rules
-        }
-    }
-    
-    with open("/usr/local/etc/xray/config.json", "w") as f:
-        json.dump(xray_config, f, indent=2)
-        
-    # Restart Xray
-    subprocess.run("systemctl restart xray 2>/dev/null", shell=True)
-    
-    # 6. Apply IPTables Rules
-    subprocess.run("sysctl -w net.ipv4.ip_forward=1", shell=True)
-    subprocess.run("sysctl -w net.ipv4.conf.all.rp_filter=0", shell=True)
-    subprocess.run("sysctl -w net.ipv4.conf.default.rp_filter=0", shell=True)
-    
-    for idx, inb in enumerate(active_inbounds):
-        fw_mark = 100 + idx
-        t_port = 12345 + idx
-        wg_sub = f"10.8.{idx}.0/24"
-        ovpn_sub = f"10.10.{idx}.0/24"
-        
-        subprocess.run(f"ip rule del fwmark {fw_mark} 2>/dev/null || true", shell=True)
-        subprocess.run(f"ip route del local default dev lo table {fw_mark} 2>/dev/null || true", shell=True)
-        subprocess.run(f"ip route add local default dev lo table {fw_mark} 2>/dev/null || true", shell=True)
-        subprocess.run(f"ip rule add fwmark {fw_mark} table {fw_mark} 2>/dev/null || true", shell=True)
-        
-        for subnet in [wg_sub, ovpn_sub]:
-            for proto in ["tcp", "udp"]:
-                subprocess.run(f"iptables -t mangle -D PREROUTING -s {subnet} -p {proto} -j TPROXY --on-port {t_port} --tproxy-mark {fw_mark} 2>/dev/null || true", shell=True)
-                subprocess.run(f"iptables -t mangle -A PREROUTING -s {subnet} -p {proto} -j TPROXY --on-port {t_port} --tproxy-mark {fw_mark}", shell=True)
-                
-    # L2TP mangle
-    subprocess.run("iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true", shell=True)
-    subprocess.run("iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true", shell=True)
-    subprocess.run("iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100", shell=True)
-    subprocess.run("iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100", shell=True)
-    
-    # Global forwards and SYN clamping
-    subprocess.run("iptables -P FORWARD ACCEPT 2>/dev/null || true", shell=True)
-    subprocess.run("iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true", shell=True)
-    subprocess.run("iptables -t mangle -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu", shell=True)
-    
-    main_iface = "eth0"
-    try:
-        main_iface = subprocess.check_output("ip route show default | awk '{print $5}' | head -n1", shell=True).decode('utf-8').strip() or "eth0"
-    except:
-        pass
-    subprocess.run(f"iptables -t nat -D POSTROUTING -o {main_iface} -j MASQUERADE 2>/dev/null || true", shell=True)
-    subprocess.run(f"iptables -t nat -A POSTROUTING -o {main_iface} -j MASQUERADE", shell=True)
-    
-    print("Direct synchronization completed successfully.")
-
-if __name__ == "__main__":
-    main()
+client-config-dir \${ccd_dir}
+keepalive 10 120
+cipher AES-256-GCM
+auth SHA256
+user nobody
+group nogroup
+persist-key
+persist-tun
+status openvpn-status_inb_\${idx}.log
+verb 3
+explicit-exit-notify 1
+auth-user-pass-verify /etc/openvpn/server/auth.sh via-file
+verify-client-cert none
+username-as-common-name
 EOF
-chmod +x /usr/local/bin/vpn-bridge-sync.py
 
-# 4. Create local Sync Shell Wrapper
-echo -e "\${YELLOW}[5/5] Installing sync daemon script...\${NC}"
-cat <<'EOF' > /usr/local/bin/vpn-bridge-sync.sh
-#!/usr/bin/env bash
-python3 /usr/local/bin/vpn-bridge-sync.py >/dev/null 2>&1
-EOF
+  if ! cmp -s "/etc/openvpn/server/server_inb_\${idx}.conf" "/etc/openvpn/server/server_inb_\${idx}.conf.tmp"; then
+    mv "/etc/openvpn/server/server_inb_\${idx}.conf.tmp" "/etc/openvpn/server/server_inb_\${idx}.conf"
+    systemctl restart "openvpn-server@server_inb_\${idx}" 2>/dev/null
+  else
+    rm "/etc/openvpn/server/server_inb_\${idx}.conf.tmp"
+  fi
+  systemctl enable "openvpn-server@server_inb_\${idx}" 2>/dev/null
+  systemctl start "openvpn-server@server_inb_\${idx}" 2>/dev/null
+done
+
+# B. Sync L2TP Chap Secrets
+curl -k -s "\${APP_URL}/api/bridge/chap-secrets" > /etc/ppp/chap-secrets.tmp
+if [ -s /etc/ppp/chap-secrets.tmp ]; then
+  if ! cmp -s /etc/ppp/chap-secrets /etc/ppp/chap-secrets.tmp; then
+    mv /etc/ppp/chap-secrets.tmp /etc/ppp/chap-secrets
+    chmod 600 /etc/ppp/chap-secrets
+  else
+    rm /etc/ppp/chap-secrets.tmp
+  fi
+fi
+
+# C. Sync L2TP IPSec Secrets
+curl -k -s "\${APP_URL}/api/bridge/ipsec-secrets" > /etc/ipsec.secrets.tmp
+if [ -s /etc/ipsec.secrets.tmp ]; then
+  if ! cmp -s /etc/ipsec.secrets /etc/ipsec.secrets.tmp; then
+    mv /etc/ipsec.secrets.tmp /etc/ipsec.secrets
+    chmod 600 /etc/ipsec.secrets
+    systemctl reload strongswan 2>/dev/null || systemctl reload strongswan-starter 2>/dev/null
+  else
+    rm /etc/ipsec.secrets.tmp
+  fi
+fi
+
+# D. Sync OpenVPN CCD Static IP Configs
+CCD_JSON=\$(curl -k -s "\${APP_URL}/api/bridge/openvpn-ccd")
+if [ -n "\$CCD_JSON" ] && [ "\$CCD_JSON" != "null" ] && [ "\$CCD_JSON" != "{}" ]; then
+  # Clean old CCDs
+  for idx in "\${ACTIVE_IDXS[@]}"; do
+    mkdir -p "/etc/openvpn/server/ccd_inb_\${idx}"
+    rm -f "/etc/openvpn/server/ccd_inb_\${idx}"/*
+  done
+  # Write new CCDs
+  echo "\$CCD_JSON" | jq -r 'to_entries[] | "\\(.key)|\\(.value)"' | while IFS="|" read -r key value; do
+    if [ -n "\$key" ] && [ -n "\$value" ]; then
+      file_path="/etc/openvpn/server/\$key"
+      mkdir -p "\$(dirname "\$file_path")"
+      echo "\$value" > "\$file_path"
+      chmod 644 "\$file_path"
+    fi
+  done
+fi
+
+# E. Sync OpenVPN users.txt
+curl -k -s "\${APP_URL}/api/bridge/openvpn-users" > /etc/openvpn/server/users.tmp
+if [ -s /etc/openvpn/server/users.tmp ]; then
+  if ! cmp -s /etc/openvpn/server/users.txt /etc/openvpn/server/users.tmp; then
+    mv /etc/openvpn/server/users.tmp /etc/openvpn/server/users.txt
+    chmod 600 /etc/openvpn/server/users.txt
+  else
+    rm /etc/openvpn/server/users.tmp
+  fi
+fi
+
+# F. Sync Xray Config JSON
+curl -k -s "\${APP_URL}/api/bridge/config" > /usr/local/etc/xray/config.tmp
+if [ -s /usr/local/etc/xray/config.tmp ]; then
+  if ! cmp -s /usr/local/etc/xray/config.json /usr/local/etc/xray/config.tmp; then
+    mv /usr/local/etc/xray/config.tmp /usr/local/etc/xray/config.json
+    systemctl restart xray 2>/dev/null
+  else
+    rm /usr/local/etc/xray/config.tmp
+  fi
+fi
+
+# G. Apply Routing, TProxy Mangle, Policy Rules dynamically
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null
+sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null
+
+for idx in "\${ACTIVE_IDXS[@]}"; do
+  fw_mark=\$(($((100)) + idx))
+  tproxy_port=\$(($((12345)) + idx))
+  wg_sub="10.8.\${idx}.0/24"
+  ovpn_sub="10.10.\${idx}.0/24"
+
+  # Flush policy routing rules for this inbound index
+  ip rule del fwmark "\$fw_mark" 2>/dev/null || true
+  ip route del local default dev lo table "\$fw_mark" 2>/dev/null || true
+  
+  # Register fresh policy routing
+  ip route add local default dev lo table "\$fw_mark" 2>/dev/null || true
+  ip rule add fwmark "\$fw_mark" table "\$fw_mark" 2>/dev/null || true
+
+  # Register TProxy redirection for WireGuard and OpenVPN subnets
+  for subnet in "\$wg_sub" "\$ovpn_sub"; do
+    for proto in "tcp" "udp"; do
+      iptables -t mangle -D PREROUTING -s "\$subnet" -p "\$proto" -j TPROXY --on-port "\$tproxy_port" --tproxy-mark "\$fw_mark" 2>/dev/null || true
+      iptables -t mangle -A PREROUTING -s "\$subnet" -p "\$proto" -j TPROXY --on-port "\$tproxy_port" --tproxy-mark "\$fw_mark"
+    done
+  done
+done
+
+# Policy routing for L2TP subnet (10.9.0.0/24 -> fallback to inbound idx 0)
+iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
+iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
+iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100
+iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100
+
+# Global rules for forwarding and TCPMSS clamping to resolve MTU bottlenecks
+iptables -P FORWARD ACCEPT 2>/dev/null || true
+iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+iptables -t mangle -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+
+main_iface=\$(ip route show default | awk '{print \$5}' | head -n1)
+if [ -n "\$main_iface" ]; then
+  iptables -t nat -D POSTROUTING -o "\$main_iface" -j MASQUERADE 2>/dev/null || true
+  iptables -t nat -A POSTROUTING -o "\$main_iface" -j MASQUERADE
+fi
+
+echo "Synchronization completed successfully."
+EOF_SYNC
+
+# Inject the current APP_HOST dynamically
+sed -i "s/##APP_HOST##/${host}/g" /usr/local/bin/vpn-bridge-sync.sh
 chmod +x /usr/local/bin/vpn-bridge-sync.sh
 
-# Install Cron Sync (runs every minute)
+# 5. Configure Cron Sync to run every 1 minute
 crontab -l 2>/dev/null | grep -v "vpn-bridge-sync.sh" | { cat; echo "* * * * * /usr/local/bin/vpn-bridge-sync.sh >/dev/null 2>&1"; } | crontab -
 
-# Run the sync immediately to start up all WireGuard/OpenVPN/L2TP configurations instantly!
-echo -e "\${YELLOW}Triggering first-time direct synchronization and starting tunnels...\${NC}"
+# Run the first synchronization immediately to pull all configs and start tunnels!
+echo -e "\${YELLOW}[4/4] Activating tunnels and downloading configurations...\${NC}"
 /usr/local/bin/vpn-bridge-sync.sh
 
-# Configure L2TP IPSec VPN config
+# Configure L2TP IPSec base template
 cat <<EOF >/etc/ipsec.conf
 config setup
   charondebug="ike 1, knl 1, cfg 0"
@@ -3236,12 +2915,11 @@ conn L2TP-PSK-noNAT
   rightprotoport=17/%any
 EOF
 
-# Set IPSec pre-shared key
+# Set IPSec base template preshared key
 echo ': PSK "SanaeiL2TPSecureKey"' > /etc/ipsec.secrets
 chmod 600 /etc/ipsec.secrets
 
-# Configure xl2tpd
-mkdir -p /etc/xl2tpd
+# Configure xl2tpd base template
 cat <<EOF >/etc/xl2tpd/xl2tpd.conf
 [global]
 port = 1701
@@ -3278,22 +2956,21 @@ systemctl restart strongswan-starter 2>/dev/null || systemctl restart strongswan
 systemctl enable xl2tpd 2>/dev/null
 systemctl restart xl2tpd 2>/dev/null
 
-# Trigger sync once more to finalize any ppp/chap setups
+# Final run to ensure xl2tpd and strongswan reload updated credentials
 /usr/local/bin/vpn-bridge-sync.sh
 
 echo -e "\${GREEN}==================================================================\${NC}"
-echo -e "\${GREEN}  ✅ 100% Direct Bridge Gateway is Active!                      \${NC}"
-echo -e "\${GREEN}  Your server is now directly connected to your main panel:     \${NC}"
-echo -e "\${GREEN}  ${panelUrl}                                                     \${NC}"
-echo -e "\${GREEN}  Zero dependency on intermediate development apps or proxies! \${NC}"
-echo -e "\${GREEN}  The sync engine runs in background every 1 minute via cron.   \${NC}"
+echo -e "\${GREEN}  ✅ Sanaei Multi-Inbound Robust Bridge is Configured!          \${NC}"
+echo -e "\${GREEN}  Your bridge is fully synced with your panel at:               \${NC}"
+echo -e "\${GREEN}  ${host}                                                     \${NC}"
+echo -e "\${GREEN}  WireGuard Handshakes and OpenVPN Credentials are 100% matched!\${NC}"
+echo -e "\${GREEN}  The sync engine runs in the background every 1 minute via cron.\${NC}"
 echo -e "\${GREEN}==================================================================\${NC}"
 `;
 
   res.setHeader("Content-Type", "text/plain");
   res.send(script);
 });
-
 // --- Dynamic Bridge Sync and Configuration API Endpoints ---
 app.get("/api/bridge/interfaces", (req, res) => {
   const inboundsList = dbData.inbounds.length > 0 ? dbData.inbounds : [
@@ -3367,6 +3044,18 @@ app.get("/api/bridge/chap-secrets", (req, res) => {
   });
   res.setHeader("Content-Type", "text/plain");
   res.send(chapContent);
+});
+
+app.get("/api/bridge/openvpn-users", (req, res) => {
+  let content = "";
+  dbData.subscriptions.forEach((sub) => {
+    if (sub.isActive === false) return;
+    if (sub.openvpnUser && sub.openvpnPass) {
+      content += `${sub.openvpnUser}:${sub.openvpnPass}\n`;
+    }
+  });
+  res.setHeader("Content-Type", "text/plain");
+  res.send(content);
 });
 
 app.get("/api/bridge/ipsec-secrets", (req, res) => {

@@ -238,7 +238,7 @@ export default function App() {
     const dns = sub.wireguardDns || wgServerDnsState || "1.1.1.1, 8.8.8.8";
     
     // Server Public Key
-    const candidatePub = inb?.wgServerPublicKey || wgServerPublicKeyState || sub.wireguardPublicKey;
+    const candidatePub = isBridge ? (wgServerPublicKeyState || sub.wireguardPublicKey) : (inb?.wgServerPublicKey || wgServerPublicKeyState || sub.wireguardPublicKey);
     const serverPub = ensureValidWgKey(candidatePub, `srv_pub_${inb?.serverIp || "node1"}`);
     
     // Clean Host/IP (Points to Bridge Server if bridge is active)
@@ -2241,12 +2241,13 @@ B79ZDiZY9oniEIIaXWGbU4Y=
                               </code>
                             </div>
 
-                            <div className="bg-white p-2 rounded-xl border border-gray-150">
+                             <div className="bg-white p-2 rounded-xl border border-gray-150">
                               <div className="flex items-center justify-between mb-0.5">
                                 <span className="text-gray-400 font-bold text-[8px]">[Peer] PublicKey</span>
                                 <button onClick={() => {
                                   const inb = getActiveInbound();
-                                  const pub = ensureValidWgKey(inb?.wgServerPublicKey || wgServerPublicKeyState || selectedSub.wireguardPublicKey);
+                                  const isBridge = bridgeRoutingEnabled;
+                                  const pub = ensureValidWgKey(isBridge ? (wgServerPublicKeyState || selectedSub.wireguardPublicKey) : (inb?.wgServerPublicKey || wgServerPublicKeyState || selectedSub.wireguardPublicKey));
                                   triggerCopy(pub, "wg_pub");
                                 }} className="text-gray-400 hover:text-gray-900 cursor-pointer">
                                   {copiedId === "wg_pub" ? <Check className="h-2.5 w-2.5 text-green-600" /> : <Copy className="h-2.5 w-2.5" />}
@@ -2255,7 +2256,8 @@ B79ZDiZY9oniEIIaXWGbU4Y=
                               <code className="font-mono text-gray-800 break-all text-[9px]">
                                 {(() => {
                                   const inb = getActiveInbound();
-                                  return ensureValidWgKey(inb?.wgServerPublicKey || wgServerPublicKeyState || selectedSub.wireguardPublicKey);
+                                  const isBridge = bridgeRoutingEnabled;
+                                  return ensureValidWgKey(isBridge ? (wgServerPublicKeyState || selectedSub.wireguardPublicKey) : (inb?.wgServerPublicKey || wgServerPublicKeyState || selectedSub.wireguardPublicKey));
                                 })()}
                               </code>
                             </div>
