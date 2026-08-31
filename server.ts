@@ -2596,7 +2596,25 @@ ip route del local default dev lo table ${ports.fwMark} 2>/dev/null || true
 ip route add local default dev lo table ${ports.fwMark} 2>/dev/null || true
 ip rule add fwmark ${ports.fwMark} table ${ports.fwMark} 2>/dev/null || true
 
-# 2. Mark packets from WireGuard subnet (${ports.wgSubnet}) & OpenVPN subnet (${ports.ovpnSubnet}) to TPROXY
+# 2. Open Firewall INPUT ports for this inbound
+iptables -D INPUT -p udp --dport ${ports.wgPort} -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -p udp --dport ${ports.wgPort} -j ACCEPT
+iptables -D INPUT -p udp --dport ${ports.openvpnPort} -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -p udp --dport ${ports.openvpnPort} -j ACCEPT
+
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow ${ports.wgPort}/udp 2>/dev/null || true
+  ufw allow ${ports.openvpnPort}/udp 2>/dev/null || true
+fi
+
+# 3. Exclude DNS (UDP 53) from TPROXY to ensure robust direct NAT DNS routing
+iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -t mangle -A PREROUTING -s ${ports.wgSubnet} -p udp --dport 53 -j ACCEPT
+
+iptables -t mangle -D PREROUTING -s ${ports.ovpnSubnet} -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -t mangle -A PREROUTING -s ${ports.ovpnSubnet} -p udp --dport 53 -j ACCEPT
+
+# 4. Mark packets from WireGuard subnet (${ports.wgSubnet}) & OpenVPN subnet (${ports.ovpnSubnet}) to TPROXY
 iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
 iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -p udp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
 iptables -t mangle -D PREROUTING -s ${ports.ovpnSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
@@ -2612,10 +2630,24 @@ iptables -t mangle -A PREROUTING -s ${ports.ovpnSubnet} -p udp -j TPROXY --on-po
   // L2TP is always bound to first inbound
   multiInboundSetupBash += `
 # Setup L2TP TPROXY marking for Inbound 1
+# Exclude DNS (UDP 53) from TPROXY for L2TP subnet
+iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p udp --dport 53 -j ACCEPT
+
 iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
 iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
 iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100
 iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100
+
+# Open Firewall INPUT ports for L2TP IPSec VPN
+iptables -D INPUT -p udp -m multiport --dports 500,4500,1701 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -p udp -m multiport --dports 500,4500,1701 -j ACCEPT
+
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow 500/udp 2>/dev/null || true
+  ufw allow 4500/udp 2>/dev/null || true
+  ufw allow 1701/udp 2>/dev/null || true
+fi
 `;
 
   const script = `#!/usr/bin/env bash
@@ -2829,6 +2861,9 @@ verify-client-cert none
 username-as-common-name
 script-security 3
 auth-user-pass-verify /etc/openvpn/server/auth.sh via-file
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 1.1.1.1"
+push "dhcp-option DNS 8.8.8.8"
 EOF
 
 systemctl enable openvpn-server@server_inb_${ports.subnetIndex} 2>/dev/null
@@ -2842,11 +2877,21 @@ systemctl daemon-reload
 
 ${multiInboundSetupBash}
 
-# Setup NAT Masquerade forwarding
+# Setup NAT Masquerade forwarding, global FORWARD policy, and TCP MSS Clamping to prevent MTU freeze
+iptables -P FORWARD ACCEPT 2>/dev/null || true
+iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+iptables -t mangle -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+
+iptables -D FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -D FORWARD -s 10.8.0.0/16 -j ACCEPT 2>/dev/null || true
 iptables -A FORWARD -s 10.8.0.0/16 -j ACCEPT
+iptables -D FORWARD -s 10.9.0.0/16 -j ACCEPT 2>/dev/null || true
 iptables -A FORWARD -s 10.9.0.0/16 -j ACCEPT
+iptables -D FORWARD -s 10.10.0.0/16 -j ACCEPT 2>/dev/null || true
 iptables -A FORWARD -s 10.10.0.0/16 -j ACCEPT
+
+iptables -t nat -D POSTROUTING -o \$MAIN_IFACE -j MASQUERADE 2>/dev/null || true
 iptables -t nat -A POSTROUTING -o \$MAIN_IFACE -j MASQUERADE
 
 # Save firewall rules
