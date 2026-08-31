@@ -2496,7 +2496,7 @@ app.get("/api/bridge/config", (req, res) => {
   const xrayInbounds: any[] = [];
   const xrayOutbounds: any[] = [];
   const routingRules: any[] = [
-    { type: "field", ip: ["geoip:private", "geoip:ir"], outTag: "direct" }
+    { type: "field", ip: ["geoip:private", "geoip:ir"], outboundTag: "direct" }
   ];
 
   inboundsList.forEach((inb, idx) => {
@@ -2542,8 +2542,8 @@ app.get("/api/bridge/config", (req, res) => {
       routingRules.push({
         type: "field",
         inboundTag: [inTagTproxy],
-        sourceIP: sourceIPs,
-        outTag: userOutboundTag
+        source: sourceIPs,
+        outboundTag: userOutboundTag
       });
     });
 
@@ -2551,7 +2551,7 @@ app.get("/api/bridge/config", (req, res) => {
     routingRules.push({
       type: "field",
       inboundTag: [inTagTproxy],
-      outTag: fallbackTag
+      outboundTag: fallbackTag
     });
   });
 
@@ -2796,25 +2796,34 @@ fi
 EOF
 chmod +x /etc/openvpn/server/auth.sh
 
-# Write OpenVPN server.conf
-cat <<EOF >/etc/openvpn/server/server.conf
-port 1194
+# Clean up existing openvpn services to prevent port collisions or stale files
+systemctl stop openvpn-server@* 2>/dev/null || true
+systemctl disable openvpn-server@* 2>/dev/null || true
+rm -f /etc/openvpn/server/server_inb_*.conf
+rm -f /etc/openvpn/server/server.conf
+
+${inboundsList.map((inb, idx) => {
+  const ports = getInboundBridgePorts(inb, idx);
+  return `
+# --- OpenVPN Server for Inbound: ${inb.tag} ---
+mkdir -p /etc/openvpn/server/ccd_inb_${ports.subnetIndex}
+cat <<EOF >/etc/openvpn/server/server_inb_${ports.subnetIndex}.conf
+port ${ports.openvpnPort}
 proto udp
-dev tun1
+dev tun_ovpn_${ports.subnetIndex}
 ca ca.crt
 cert server.crt
 key server.key
 dh none
 topology subnet
-server 10.10.0.0 255.255.255.0
-client-config-dir /etc/openvpn/server/ccd
-ifconfig-pool-persist ipp.txt
+server 10.10.${ports.subnetIndex}.0 255.255.255.0
+client-config-dir /etc/openvpn/server/ccd_inb_${ports.subnetIndex}
 keepalive 10 120
 cipher AES-256-GCM
 data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305
 persist-key
 persist-tun
-status openvpn-status.log
+status openvpn-status_inb_${ports.subnetIndex}.log
 verb 3
 verify-client-cert none
 username-as-common-name
@@ -2822,8 +2831,10 @@ script-security 3
 auth-user-pass-verify /etc/openvpn/server/auth.sh via-file
 EOF
 
-systemctl enable openvpn-server@server 2>/dev/null
-systemctl restart openvpn-server@server 2>/dev/null
+systemctl enable openvpn-server@server_inb_${ports.subnetIndex} 2>/dev/null
+systemctl restart openvpn-server@server_inb_${ports.subnetIndex} 2>/dev/null
+`;
+}).join("\n")}
 
 # 6. Setup Policy Routing & Auto-Sync Cron Job
 echo -e "\${YELLOW}[6/6] Finalizing Routing Policies and Synchronization Service...\${NC}"
@@ -2882,6 +2893,27 @@ if [ -s /etc/ipsec.secrets.tmp ]; then
   else
     rm /etc/ipsec.secrets.tmp
   fi
+fi
+
+# 4. Sync OpenVPN CCD Configs for Static IP mapping
+CCD_JSON=\$(curl -s "http://\$HOST/api/bridge/openvpn-ccd")
+if [ -n "\$CCD_JSON" ] && [ "\$CCD_JSON" != "null" ] && [ "\$CCD_JSON" != "{}" ]; then
+  # Clear existing CCD configs
+  for dir in /etc/openvpn/server/ccd_inb_*; do
+    if [ -d "\$dir" ]; then
+      rm -f "\$dir"/*
+    fi
+  done
+  
+  # Parse JSON and write each file safely using pipe separator
+  echo "\$CCD_JSON" | jq -r 'to_entries[] | "\(.key)|\(.value)"' | while IFS="|" read -r key value; do
+    if [ -n "\$key" ] && [ -n "\$value" ]; then
+      file_path="/etc/openvpn/server/\$key"
+      mkdir -p "\$(dirname "\$file_path")"
+      echo "\$value" > "\$file_path"
+      chmod 644 "\$file_path"
+    fi
+  done
 fi
 EOF
 chmod +x /usr/local/bin/vpn-bridge-sync.sh
@@ -2942,6 +2974,27 @@ app.get("/api/bridge/wg-config/:interface", (req, res) => {
 
   res.setHeader("Content-Type", "text/plain");
   res.send(conf);
+});
+
+app.get("/api/bridge/openvpn-ccd", (req, res) => {
+  const inboundsList = dbData.inbounds.length > 0 ? dbData.inbounds : [
+    { id: "in-default", tag: "Default Inbound" }
+  ];
+  const response: Record<string, string> = {};
+
+  inboundsList.forEach((inb, idx) => {
+    const ports = getInboundBridgePorts(inb, idx);
+    dbData.subscriptions.forEach((sub, subIdx) => {
+      if (sub.isActive === false) return;
+      if (sub.openvpnUser) {
+        const clientIp = `10.10.${ports.subnetIndex}.${100 + subIdx}`;
+        const ccdFile = `ccd_inb_${ports.subnetIndex}/${sub.openvpnUser}`;
+        response[ccdFile] = `ifconfig-push ${clientIp} 255.255.255.0`;
+      }
+    });
+  });
+
+  res.json(response);
 });
 
 app.get("/api/bridge/chap-secrets", (req, res) => {
@@ -3424,11 +3477,15 @@ app.get("/api/sub/:token/wireguard-conf", (req, res) => {
   const directServerIp = inbound?.serverIp || sub.l2tpServerIp || "127.0.0.1";
   const { host: serverIp, isBridge } = resolveConnectionHost(req, directServerIp);
   const serverPort = isBridge ? bridgePorts.wgPort : (inbound?.wgPort || inbound?.port || dbData.settings?.wgServerPort || 51820);
-  const serverPub = inbound?.wgServerPublicKey || dbData.settings?.wgServerPublicKey || sub.wireguardPublicKey;
+  const serverPub = isBridge 
+    ? (dbData.settings?.wgServerPublicKey || sub.wireguardPublicKey)
+    : (inbound?.wgServerPublicKey || dbData.settings?.wgServerPublicKey || sub.wireguardPublicKey);
   const subIdx = dbData.subscriptions.findIndex((s) => s.id === sub.id);
   const safeSubIdx = subIdx >= 0 ? subIdx : 0;
   
-  const clientAddr = sub.wireguardAddress || `10.8.0.${100 + safeSubIdx}/24`;
+  const clientAddr = isBridge 
+    ? `10.8.${bridgePorts.subnetIndex}.${100 + safeSubIdx}/24`
+    : (sub.wireguardAddress || `10.8.0.${100 + safeSubIdx}/24`);
 
   const wgConf = `# ----------------------------------------------------
 # Sanaei Smart Sub - WireGuard Profile
