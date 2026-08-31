@@ -95,6 +95,10 @@ interface InboundNode {
   sni?: string;
   flow?: string;
   method?: string;
+  upstreamUuid?: string;
+  realityPublicKey?: string;
+  realityShortId?: string;
+  realitySpiderX?: string;
 }
 
 interface DB {
@@ -1170,22 +1174,6 @@ function extractInboundHostAndIp(
   }
 
   // 4. Check TLS / REALITY / WS / TCP / gRPC Domain or SNI
-  // REALITY serverNames
-  if (streamSettings?.realitySettings?.serverNames && Array.isArray(streamSettings.realitySettings.serverNames) && streamSettings.realitySettings.serverNames.length > 0) {
-    const realitySni = streamSettings.realitySettings.serverNames[0].trim();
-    if (realitySni && !realitySni.includes("localhost") && !realitySni.includes("127.0.0.1")) {
-      return {
-        hostOrIp: realitySni,
-        port,
-        country: detectCountry(tag, realitySni),
-        sourceType: "reality",
-        extractedFrom: `REALITY SNI (${realitySni})`,
-        openvpnProto: "tcp",
-        notes: `استخراج از دامنه REALITY اینباند سنایی (${realitySni})`,
-      };
-    }
-  }
-
   // TLS / XTLS SNI ServerName
   const tlsSni = (streamSettings?.tlsSettings?.serverName || streamSettings?.xtlsSettings?.serverName || "").trim();
   if (tlsSni && !tlsSni.includes("localhost") && !tlsSni.includes("127.0.0.1")) {
@@ -2102,6 +2090,14 @@ app.post("/api/inbounds/sync-from-panels", async (req, res) => {
               const extractedFlow = settings?.clients?.[0]?.flow || "";
               const extractedMethod = settings?.method || "";
 
+              // Extract upstream authentication key/uuid and REALITY parameters if present
+              const firstClient = settings?.clients?.[0];
+              const upstreamUuid = firstClient?.id || firstClient?.password || settings?.password || "";
+              const realitySettings = streamSettings?.realitySettings || {};
+              const realityPublicKey = realitySettings?.publicKey || "";
+              const realityShortId = realitySettings?.shortIds?.[0] || "";
+              const realitySpiderX = realitySettings?.spiderX || "";
+
               const existingIdx = dbData.inbounds.findIndex(i => i.id === customId || (i.panelId === panel.id && i.port === inboundPort && i.protocol === inboundProtocol));
               const inboundNodeData: InboundNode = {
                 id: customId,
@@ -2126,7 +2122,11 @@ app.post("/api/inbounds/sync-from-panels", async (req, res) => {
                 path: extractedPathStr,
                 sni: extractedSni,
                 flow: extractedFlow,
-                method: extractedMethod
+                method: extractedMethod,
+                upstreamUuid,
+                realityPublicKey,
+                realityShortId,
+                realitySpiderX
               };
 
               if (existingIdx !== -1) {
@@ -2413,6 +2413,9 @@ function generateXrayOutboundForInboundAndUser(inb: any, uuid: string, outTag: s
   const sni = inb.sni || address;
   const flow = inb.flow || "";
 
+  // Authenticate using the real synced upstream UUID/Password from 3x-ui inbound if available, otherwise fall back to subscription UUID
+  const authId = inb.upstreamUuid || uuid;
+
   if (protocol === "vless") {
     return {
       tag: outTag,
@@ -2421,14 +2424,21 @@ function generateXrayOutboundForInboundAndUser(inb: any, uuid: string, outTag: s
         vnext: [{
           address,
           port,
-          users: [{ id: uuid, encryption: "none", flow }]
+          users: [{ id: authId, encryption: "none", flow }]
         }]
       },
       streamSettings: {
         network,
         security,
         tlsSettings: security === "tls" ? { serverName: sni } : undefined,
-        realitySettings: security === "reality" ? { serverName: sni } : undefined,
+        realitySettings: security === "reality" ? {
+          show: false,
+          fingerprint: "chrome",
+          serverName: sni,
+          publicKey: inb.realityPublicKey || "",
+          shortId: inb.realityShortId || "",
+          spiderX: inb.realitySpiderX || ""
+        } : undefined,
         wsSettings: network === "ws" ? { path } : undefined,
         grpcSettings: network === "grpc" ? { serviceName: path } : undefined
       }
@@ -2441,7 +2451,7 @@ function generateXrayOutboundForInboundAndUser(inb: any, uuid: string, outTag: s
         vnext: [{
           address,
           port,
-          users: [{ id: uuid, alterId: 0, security: "auto" }]
+          users: [{ id: authId, alterId: 0, security: "auto" }]
         }]
       },
       streamSettings: {
@@ -2457,7 +2467,7 @@ function generateXrayOutboundForInboundAndUser(inb: any, uuid: string, outTag: s
       tag: outTag,
       protocol: "trojan",
       settings: {
-        servers: [{ address, port, password: uuid }]
+        servers: [{ address, port, password: authId }]
       },
       streamSettings: {
         network,
@@ -2472,7 +2482,7 @@ function generateXrayOutboundForInboundAndUser(inb: any, uuid: string, outTag: s
       tag: outTag,
       protocol: "shadowsocks",
       settings: {
-        servers: [{ address, port, method: inb.method || "aes-256-gcm", password: uuid }]
+        servers: [{ address, port, method: inb.method || "aes-256-gcm", password: authId }]
       }
     };
   }
@@ -2607,14 +2617,7 @@ if command -v ufw >/dev/null 2>&1; then
   ufw allow ${ports.openvpnPort}/udp 2>/dev/null || true
 fi
 
-# 3. Exclude DNS (UDP 53) from TPROXY to ensure robust direct NAT DNS routing
-iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -t mangle -A PREROUTING -s ${ports.wgSubnet} -p udp --dport 53 -j ACCEPT
-
-iptables -t mangle -D PREROUTING -s ${ports.ovpnSubnet} -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -t mangle -A PREROUTING -s ${ports.ovpnSubnet} -p udp --dport 53 -j ACCEPT
-
-# 4. Mark packets from WireGuard subnet (${ports.wgSubnet}) & OpenVPN subnet (${ports.ovpnSubnet}) to TPROXY
+# 3. Mark packets from WireGuard subnet (${ports.wgSubnet}) & OpenVPN subnet (${ports.ovpnSubnet}) to TPROXY
 iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
 iptables -t mangle -D PREROUTING -s ${ports.wgSubnet} -p udp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
 iptables -t mangle -D PREROUTING -s ${ports.ovpnSubnet} -p tcp -j TPROXY --on-port ${ports.tproxyPort} --tproxy-mark ${ports.fwMark} 2>/dev/null || true
@@ -2630,10 +2633,6 @@ iptables -t mangle -A PREROUTING -s ${ports.ovpnSubnet} -p udp -j TPROXY --on-po
   // L2TP is always bound to first inbound
   multiInboundSetupBash += `
 # Setup L2TP TPROXY marking for Inbound 1
-# Exclude DNS (UDP 53) from TPROXY for L2TP subnet
-iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p udp --dport 53 -j ACCEPT
-
 iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
 iptables -t mangle -D PREROUTING -s 10.9.0.0/24 -p udp -j TPROXY --on-port 12345 --tproxy-mark 100 2>/dev/null || true
 iptables -t mangle -A PREROUTING -s 10.9.0.0/24 -p tcp -j TPROXY --on-port 12345 --tproxy-mark 100
@@ -2683,10 +2682,30 @@ echo -e "\${YELLOW}[1/6] Installing Xray-core and VPN daemons...\${NC}"
 apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \\
   curl wget jq iptables iproute2 wireguard strongswan xl2tpd ppp openvpn net-tools openssl cron
 
+# Download wireguard-go as fallback if kernel-space WireGuard is not supported (e.g. on containerized VPS like LXC/OpenVZ)
+if ! ip link add dev wg-test-sys type wireguard 2>/dev/null; then
+  echo -e "\${YELLOW}Kernel-space WireGuard is not supported on this VPS. Installing wireguard-go precompiled fallback...\${NC}"
+  wget -qO /usr/local/bin/wireguard-go "https://github.com/v2fly/wireguard-go-builder/releases/latest/download/wireguard-go-linux-amd64" || \\
+  curl -L -o /usr/local/bin/wireguard-go "https://github.com/v2fly/wireguard-go-builder/releases/latest/download/wireguard-go-linux-amd64"
+  chmod +x /usr/local/bin/wireguard-go
+else
+  ip link del dev wg-test-sys 2>/dev/null || true
+fi
+
 # Download Xray-core if not present
 if ! command -v xray >/dev/null 2>&1; then
   echo -e "\${YELLOW}Installing latest Xray-core...\${NC}"
   bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+fi
+
+# Set Xray to run as root to allow TPROXY binding and net admin capabilities
+if [ -f /etc/systemd/system/xray.service ]; then
+  sed -i 's/User=xray/User=root/g' /etc/systemd/system/xray.service
+  systemctl daemon-reload
+fi
+if [ -f /lib/systemd/system/xray.service ]; then
+  sed -i 's/User=xray/User=root/g' /lib/systemd/system/xray.service
+  systemctl daemon-reload
 fi
 
 # Enable IP forwarding and disable rp_filter for TPROXY routing stability
@@ -2965,6 +2984,10 @@ chmod +x /usr/local/bin/vpn-bridge-sync.sh
 
 # Install Cron Sync (runs every minute)
 crontab -l 2>/dev/null | grep -v "vpn-bridge-sync.sh" | { cat; echo "* * * * * /usr/local/bin/vpn-bridge-sync.sh >/dev/null 2>&1"; } | crontab -
+
+# Run the sync immediately to start up all WireGuard/OpenVPN/L2TP configurations instantly!
+echo -e "\${YELLOW}Triggering first-time synchronization and starting VPN tunnels...\${NC}"
+/usr/local/bin/vpn-bridge-sync.sh >/dev/null 2>&1
 
 echo -e "\${GREEN}==================================================================\${NC}"
 echo -e "\${GREEN}  ✅ Multi-Inbound Dedicated Bridge Gateway is Active!          \${NC}"
